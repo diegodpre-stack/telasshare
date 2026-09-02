@@ -4,7 +4,7 @@ Primeira versão funcional de compartilhamento privado de tela. O navegador do t
 
 O aplicativo aceita várias transmissões simultâneas: uma tela pode ser enviada para vários amigos, cada pessoa pode transmitir enquanto assiste outras telas, e o painel oferece tamanhos Pequeno, Médio e Grande, além de tela cheia por transmissão.
 
-Depois do login geral do site, o lobby mostra apenas os nomes das salas disponíveis. Qualquer pessoa autenticada pode criar uma sala com nome e senha; participantes, presença, transmissões e sinalização WebRTC só ficam disponíveis após a senha da sala ser validada. Dentro dela, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores. Quatro senhas administrativas opcionais dão acesso a controles de expulsar e banir usuários pelo nome; os banimentos ficam em memória até o próximo reinício do serviço.
+Usuários comuns entram no site apenas escolhendo um nome. O botão **ADM** revela o campo de senha administrativa. O lobby mostra somente os nomes das salas disponíveis; participantes, presença, transmissões e sinalização WebRTC só ficam disponíveis após a senha da sala ser validada. `ADMIN_PASSWORD_1` é o único SUPER ADM e pode entrar em qualquer sala; os outros administradores precisam da senha da sala como qualquer usuário. Dentro dela, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores.
 
 ## Requisitos
 
@@ -23,7 +23,7 @@ npm install
 npm run dev
 ```
 
-Abra `http://localhost:5173` em duas janelas ou perfis do navegador. Entre usando a senha geral configurada em `ROOM_PASSWORD`, crie uma sala na primeira janela e clique nela para entrar pela segunda.
+Abra `http://localhost:5173` em duas janelas ou perfis do navegador. Entre com nomes diferentes, crie uma sala na primeira janela e clique nela para entrar pela segunda.
 
 ## Dois PCs na mesma rede (recomendado: HTTPS)
 
@@ -65,13 +65,13 @@ No plano gratuito, o serviço pode dormir após 15 minutos sem tráfego e levar 
 
 ### Salas privadas
 
-Defina `ROOM_PASSWORD` no Render com a senha geral compartilhada — atualmente `REMOVIDA_DO_HISTORICO` no seu serviço. O Blueprint gera `SESSION_SECRET` automaticamente. Depois desse login, o lobby mostra os nomes das salas, mas não mostra participantes nem transmissões. Qualquer usuário autenticado pode criar uma sala e escolher sua senha; os amigos clicam nela e informam essa senha para entrar. O login geral fica salvo no navegador por até 30 dias. O servidor limita tentativas incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.
+O Blueprint gera `SESSION_SECRET` automaticamente. Não existe senha geral para usuários comuns: basta escolher um nome. Depois desse login, o lobby mostra os nomes das salas, mas não mostra participantes nem transmissões. Qualquer usuário pode criar uma sala e escolher sua senha; os amigos clicam nela e informam essa senha para entrar. O login fica salvo no navegador por até 30 dias. O servidor limita tentativas administrativas incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.
 
 As salas ficam somente na memória nesta versão. Se o Render reiniciar ou adormecer o serviço gratuito, elas desaparecem e precisam ser criadas novamente; a interface descartará a sessão antiga na próxima tentativa. As senhas são armazenadas em memória com `scrypt`, salt individual e nunca são enviadas para outros participantes.
 
 Nunca coloque `SESSION_SECRET`, senhas administrativas nem o arquivo `.env` no Git.
 
-Defina também `ADMIN_PASSWORD_1` até `ADMIN_PASSWORD_4` no Render. Qualquer nome que entrar com uma dessas senhas recebe o perfil ADM.
+Defina `ADMIN_PASSWORD_1` até `ADMIN_PASSWORD_4` no Render. A primeira senha é exclusiva do SUPER ADM e deve ficar somente com o proprietário; ela permite entrar em qualquer sala sem a senha. As outras três concedem moderação, mas não permitem entrar em uma sala sem sua senha.
 
 1. Publique o frontend com HTTPS e defina `VITE_SIGNAL_URL=wss://seu-dominio-de-sinalizacao` antes de `npm run build`.
 2. Publique o servidor Node em uma hospedagem que aceite WebSocket e configure `CLIENT_ORIGIN=https://seu-frontend`.

@@ -16,8 +16,7 @@ app.use(express.json({ limit: '16kb' }))
 app.get('/health', (_req, res) => res.json({ ok: true }))
 
 const sessionSecret = process.env.SESSION_SECRET || (!process.env.RENDER ? 'local-development-session-secret' : '')
-const sitePassword = process.env.ROOM_PASSWORD || (!process.env.RENDER ? 'entretelas' : '')
-const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_${number}`]).filter(Boolean)
+const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_${number}`])
 const loginAttempts = new Map()
 const rooms = new Map()
 const ROOM_SESSION_MS = 30 * 24 * 60 * 60 * 1000
@@ -64,12 +63,17 @@ const verifySession = (token) => {
 }
 
 app.post('/api/login', (req, res) => {
-  if (!sitePassword || !sessionSecret) return res.status(503).json({ error: 'O acesso ao site ainda não foi configurado.' })
+  if (!sessionSecret) return res.status(503).json({ error: 'O acesso ao site ainda não foi configurado.' })
   const attempt = rateLimitLogin(req, res); if (!attempt) return
   const name = cleanUserName(req.body?.name)
-  const password = typeof req.body?.password === 'string' ? req.body.password : ''
-  const role = adminPasswords.some((adminPassword) => secretMatches(password, adminPassword)) ? 'admin' : 'member'
-  if (name.length < 2 || (role !== 'admin' && !secretMatches(password, sitePassword))) {
+  const adminPassword = typeof req.body?.adminPassword === 'string' ? req.body.adminPassword : ''
+  let role = 'member'
+  if (adminPassword) {
+    if (adminPasswords[0] && secretMatches(adminPassword, adminPasswords[0])) role = 'superadmin'
+    else if (adminPasswords.slice(1).some((password) => secretMatches(adminPassword, password))) role = 'admin'
+    else role = 'invalid'
+  }
+  if (name.length < 2 || role === 'invalid') {
     attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
     return res.status(401).json({ error: 'Usuário ou senha incorretos.' })
   }
@@ -103,7 +107,7 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
   const entry = [...rooms.entries()].find(([, candidate]) => candidate.id === req.params.roomId)
   const room = entry?.[1]
-  const valid = room && (authenticated.role === 'admin' || passwordMatches(password, room.password))
+  const valid = room && (authenticated.role === 'superadmin' || passwordMatches(password, room.password))
   if (!valid) {
     attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
     return res.status(401).json({ error: 'Senha da sala incorreta.' })
@@ -158,9 +162,9 @@ wss.on('connection', (socket, request) => {
       if (roomClients(room.id).some((client) => client.name.toLocaleLowerCase('pt-BR') === name.toLocaleLowerCase('pt-BR'))) {
         safeSend(socket, { type: 'error', message: 'Este nome de usuário já está online.' }); return socket.close(1008, 'Nome em uso')
       }
-      clients.set(id, { id, name, role: authenticated.role === 'admin' ? 'admin' : 'member', roomId: room.id, broadcasting: false, socket })
+      clients.set(id, { id, name, role: ['admin', 'superadmin'].includes(authenticated.role) ? authenticated.role : 'member', roomId: room.id, broadcasting: false, socket })
       registered = true
-      safeSend(socket, { type: 'welcome', id, role: authenticated.role === 'admin' ? 'admin' : 'member', roomName: room.name })
+      safeSend(socket, { type: 'welcome', id, role: ['admin', 'superadmin'].includes(authenticated.role) ? authenticated.role : 'member', roomName: room.name })
       return broadcastUsers(room.id)
     }
     const sender = clients.get(id)
@@ -174,7 +178,7 @@ wss.on('connection', (socket, request) => {
       return safeSend(target.socket, { type: 'watch-request', from: id, fromName: sender.name })
     }
     if (message.type === 'moderate') {
-      if (sender.role !== 'admin' || !['kick', 'ban'].includes(message.action)) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })
+      if (!['admin', 'superadmin'].includes(sender.role) || !['kick', 'ban'].includes(message.action)) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })
       if (message.action === 'ban') room.bannedNames.add(target.name.toLocaleLowerCase('pt-BR'))
       safeSend(target.socket, { type: message.action === 'ban' ? 'banned' : 'kicked' })
       target.socket.close(1008, message.action === 'ban' ? 'Banido' : 'Expulso')

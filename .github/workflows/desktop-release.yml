@@ -31,8 +31,15 @@ jobs:
           $version = node -p "require('./package.json').version"
           git tag "v$version"
           git push origin "v$version"
-      - name: Build and publish installer
+      - name: Build installer
         shell: pwsh
-        run: npm run desktop:dist -- --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run desktop:dist -- --publish never
+      - name: Publish release files
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          generate_release_notes: true
+          files: |
+            release/EntreTelas-Setup.exe
+            release/EntreTelas-Setup.exe.blockmap
+            release/latest.yml

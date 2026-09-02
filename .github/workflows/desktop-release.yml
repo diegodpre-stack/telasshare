@@ -16,8 +16,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -25,6 +25,12 @@ jobs:
       - name: Create a newer app version for this build
         shell: pwsh
         run: npm version "0.1.${{ github.run_number }}" --no-git-tag-version
+      - name: Create release tag
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          git tag "v$version"
+          git push origin "v$version"
       - name: Build and publish installer
         shell: pwsh
         run: npm run desktop:dist -- --publish always

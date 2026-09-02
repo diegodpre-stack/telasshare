@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: entretelas
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: HOST
+        value: 0.0.0.0
+      - key: ROOM_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true

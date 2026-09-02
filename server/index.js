@@ -16,9 +16,31 @@ app.use(express.json({ limit: '16kb' }))
 app.get('/health', (_req, res) => res.json({ ok: true }))
 
 const sessionSecret = process.env.SESSION_SECRET || (!process.env.RENDER ? 'local-development-session-secret' : '')
-const roomPassword = process.env.ROOM_PASSWORD || (!process.env.RENDER ? 'entretelas' : '')
 const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_${number}`]).filter(Boolean)
 const loginAttempts = new Map()
+const rooms = new Map()
+const ROOM_SESSION_MS = 30 * 24 * 60 * 60 * 1000
+const normalizeRoomName = (value) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 40) : ''
+const roomKey = (name) => name.toLocaleLowerCase('pt-BR')
+const hashPassword = (password, salt = crypto.randomBytes(16).toString('base64url')) => ({
+  salt,
+  hash: crypto.scryptSync(password, salt, 64).toString('base64url'),
+})
+const passwordMatches = (password, stored) => {
+  if (typeof password !== 'string' || !stored?.salt || !stored?.hash) return false
+  const actual = crypto.scryptSync(password, stored.salt, 64)
+  const expected = Buffer.from(stored.hash, 'base64url')
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected)
+}
+const secretMatches = (password, expected) => typeof password === 'string' && typeof expected === 'string' && password.length === expected.length && crypto.timingSafeEqual(Buffer.from(password), Buffer.from(expected))
+const cleanUserName = (value) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 32) : ''
+const rateLimitLogin = (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown'
+  const now = Date.now()
+  const recent = (loginAttempts.get(ip) || []).filter((time) => now - time < 10 * 60 * 1000)
+  if (recent.length >= 10) { res.status(429).json({ error: 'Muitas tentativas. Aguarde dez minutos.' }); return null }
+  return { ip, now, recent }
+}
 const signSession = (payload) => {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
   const signature = crypto.createHmac('sha256', sessionSecret).update(body).digest('base64url')
@@ -35,19 +57,39 @@ const verifySession = (token) => {
   try { const payload = JSON.parse(Buffer.from(body, 'base64url')); return payload.exp > Date.now() ? payload : null } catch { return null }
 }
 
-app.post('/api/login', (req, res) => {
-  if (!roomPassword || !sessionSecret) return res.status(503).json({ error: 'A senha da sala ainda não foi configurada.' })
-  const ip = req.ip || req.socket.remoteAddress || 'unknown'
-  const now = Date.now(); const recent = (loginAttempts.get(ip) || []).filter((time) => now - time < 10 * 60 * 1000)
-  if (recent.length >= 10) return res.status(429).json({ error: 'Muitas tentativas. Aguarde dez minutos.' })
-  const name = typeof req.body?.name === 'string' ? req.body.name.trim().replace(/\s+/g, ' ').slice(0, 32) : ''
+app.post('/api/rooms', (req, res) => {
+  if (!sessionSecret) return res.status(503).json({ error: 'O serviço ainda não foi configurado.' })
+  const attempt = rateLimitLogin(req, res); if (!attempt) return
+  const name = cleanUserName(req.body?.name)
+  const roomName = normalizeRoomName(req.body?.roomName)
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
-  const matches = (expected) => password.length === expected.length && crypto.timingSafeEqual(Buffer.from(password), Buffer.from(expected))
-  const role = adminPasswords.some(matches) ? 'admin' : 'member'
-  const valid = role === 'admin' || matches(roomPassword)
-  if (name.length < 2 || !valid) { recent.push(now); loginAttempts.set(ip, recent); return res.status(401).json({ error: 'Usuário ou senha incorretos.' }) }
-  loginAttempts.delete(ip)
-  res.json({ session: signSession({ sub: crypto.randomUUID(), name, role, exp: now + 30 * 24 * 60 * 60 * 1000 }), role })
+  if (name.length < 2 || roomName.length < 2 || password.length < 4 || password.length > 128) {
+    attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
+    return res.status(400).json({ error: 'Informe usuário, nome da sala e uma senha com pelo menos 4 caracteres.' })
+  }
+  const key = roomKey(roomName)
+  if (rooms.has(key)) return res.status(409).json({ error: 'Não foi possível criar essa sala. Escolha outro nome.' })
+  const room = { id: crypto.randomUUID(), name: roomName, password: hashPassword(password), bannedNames: new Set(), createdAt: attempt.now }
+  rooms.set(key, room); loginAttempts.delete(attempt.ip)
+  const role = adminPasswords.some((adminPassword) => secretMatches(password, adminPassword)) ? 'admin' : 'member'
+  res.status(201).json({ session: signSession({ sub: crypto.randomUUID(), name, role, roomId: room.id, roomKey: key, exp: attempt.now + ROOM_SESSION_MS }), role, roomName })
+})
+
+app.post('/api/rooms/join', (req, res) => {
+  if (!sessionSecret) return res.status(503).json({ error: 'O serviço ainda não foi configurado.' })
+  const attempt = rateLimitLogin(req, res); if (!attempt) return
+  const name = cleanUserName(req.body?.name)
+  const key = roomKey(normalizeRoomName(req.body?.roomName))
+  const password = typeof req.body?.password === 'string' ? req.body.password : ''
+  const room = rooms.get(key)
+  const role = adminPasswords.some((adminPassword) => secretMatches(password, adminPassword)) ? 'admin' : 'member'
+  const valid = room && (role === 'admin' || passwordMatches(password, room.password))
+  if (name.length < 2 || !valid) {
+    attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
+    return res.status(401).json({ error: 'Sala, usuário ou senha incorretos.' })
+  }
+  loginAttempts.delete(attempt.ip)
+  res.json({ session: signSession({ sub: crypto.randomUUID(), name, role, roomId: room.id, roomKey: key, exp: attempt.now + ROOM_SESSION_MS }), role, roomName: room.name })
 })
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -61,18 +103,17 @@ const tls = process.env.TLS_CERT_PATH && process.env.TLS_KEY_PATH
 const server = tls ? createHttpsServer(tls, app) : createHttpServer(app)
 const wss = new WebSocketServer({ server, maxPayload: 128 * 1024 })
 const clients = new Map()
-const bannedNames = new Set()
 const allowedTypes = new Set(['hello', 'broadcast-start', 'broadcast-stop', 'watch-request', 'moderate', 'signal', 'stop'])
 
 const safeSend = (socket, message) => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }
-const publicUsers = () => [...clients.values()].map(({ id, name, role, broadcasting }) => ({ id, name, role, broadcasting }))
-const broadcastUsers = () => {
-  const message = { type: 'users', users: publicUsers() }
-  for (const { socket } of clients.values()) safeSend(socket, message)
+const roomClients = (roomId) => [...clients.values()].filter((client) => client.roomId === roomId)
+const publicUsers = (roomId) => roomClients(roomId).map(({ id, name, role, broadcasting }) => ({ id, name, role, broadcasting }))
+const broadcastUsers = (roomId) => {
+  const message = { type: 'users', users: publicUsers(roomId) }
+  for (const { socket } of roomClients(roomId)) safeSend(socket, message)
 }
-const cleanName = (value) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 32) : ''
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const validDescription = (value) => isObject(value) && ['offer', 'answer'].includes(value.type) && typeof value.sdp === 'string' && value.sdp.length < 100_000
 const validCandidate = (value) => value === null || (isObject(value) && (value.candidate === undefined || typeof value.candidate === 'string'))
@@ -81,7 +122,8 @@ const validConnectionId = (value) => typeof value === 'string' && /^[a-zA-Z0-9-]
 wss.on('connection', (socket, request) => {
   const sessionToken = new URL(request.url, 'http://localhost').searchParams.get('session')
   const authenticated = verifySession(sessionToken)
-  if (!authenticated) { socket.close(1008, 'Login necessário'); return }
+  const room = authenticated ? rooms.get(authenticated.roomKey) : null
+  if (!authenticated || !room || room.id !== authenticated.roomId) { socket.close(1008, 'Entrada na sala necessária'); return }
   const id = crypto.randomUUID()
   let registered = false
   socket.on('message', (raw) => {
@@ -90,23 +132,22 @@ wss.on('connection', (socket, request) => {
     if (!isObject(message) || !allowedTypes.has(message.type)) return safeSend(socket, { type: 'error', message: 'Tipo de mensagem inválido.' })
     if (!registered) {
       if (message.type !== 'hello') return safeSend(socket, { type: 'error', message: 'Identifique-se primeiro.' })
-      const name = cleanName(authenticated.name)
+      const name = cleanUserName(authenticated.name)
       if (name.length < 2) return safeSend(socket, { type: 'error', message: 'Use um nome com pelo menos 2 caracteres.' })
-      if (clients.size >= 5) { safeSend(socket, { type: 'room-full', message: 'A sala atingiu o limite de 5 pessoas.' }); return socket.close(1008, 'Sala cheia') }
-      if (bannedNames.has(name.toLocaleLowerCase('pt-BR'))) { safeSend(socket, { type: 'banned' }); return socket.close(1008, 'Banido') }
-      if ([...clients.values()].some((client) => client.name.toLocaleLowerCase('pt-BR') === name.toLocaleLowerCase('pt-BR'))) {
+      if (room.bannedNames.has(name.toLocaleLowerCase('pt-BR'))) { safeSend(socket, { type: 'banned' }); return socket.close(1008, 'Banido') }
+      if (roomClients(room.id).some((client) => client.name.toLocaleLowerCase('pt-BR') === name.toLocaleLowerCase('pt-BR'))) {
         safeSend(socket, { type: 'error', message: 'Este nome de usuário já está online.' }); return socket.close(1008, 'Nome em uso')
       }
-      clients.set(id, { id, name, role: authenticated.role === 'admin' ? 'admin' : 'member', broadcasting: false, socket })
+      clients.set(id, { id, name, role: authenticated.role === 'admin' ? 'admin' : 'member', roomId: room.id, broadcasting: false, socket })
       registered = true
-      safeSend(socket, { type: 'welcome', id, role: authenticated.role === 'admin' ? 'admin' : 'member' })
-      return broadcastUsers()
+      safeSend(socket, { type: 'welcome', id, role: authenticated.role === 'admin' ? 'admin' : 'member', roomName: room.name })
+      return broadcastUsers(room.id)
     }
     const sender = clients.get(id)
-    if (message.type === 'broadcast-start') { sender.broadcasting = true; return broadcastUsers() }
-    if (message.type === 'broadcast-stop') { sender.broadcasting = false; return broadcastUsers() }
+    if (message.type === 'broadcast-start') { sender.broadcasting = true; return broadcastUsers(sender.roomId) }
+    if (message.type === 'broadcast-stop') { sender.broadcasting = false; return broadcastUsers(sender.roomId) }
     const target = typeof message.to === 'string' ? clients.get(message.to) : null
-    if (!target || target.id === id) return safeSend(socket, { type: 'error', message: 'Usuário indisponível.' })
+    if (!target || target.id === id || target.roomId !== sender.roomId) return safeSend(socket, { type: 'error', message: 'Usuário indisponível.' })
 
     if (message.type === 'watch-request') {
       if (!target.broadcasting) return safeSend(socket, { type: 'error', message: 'Esta transmissão não está mais disponível.' })
@@ -114,7 +155,7 @@ wss.on('connection', (socket, request) => {
     }
     if (message.type === 'moderate') {
       if (sender.role !== 'admin' || !['kick', 'ban'].includes(message.action)) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })
-      if (message.action === 'ban') bannedNames.add(target.name.toLocaleLowerCase('pt-BR'))
+      if (message.action === 'ban') room.bannedNames.add(target.name.toLocaleLowerCase('pt-BR'))
       safeSend(target.socket, { type: message.action === 'ban' ? 'banned' : 'kicked' })
       target.socket.close(1008, message.action === 'ban' ? 'Banido' : 'Expulso')
       return
@@ -133,9 +174,9 @@ wss.on('connection', (socket, request) => {
   })
   socket.on('close', () => {
     if (!registered) return
-    clients.delete(id)
-    for (const { socket: peerSocket } of clients.values()) safeSend(peerSocket, { type: 'peer-left', id })
-    broadcastUsers()
+    const departed = clients.get(id); clients.delete(id)
+    for (const { socket: peerSocket } of roomClients(departed.roomId)) safeSend(peerSocket, { type: 'peer-left', id })
+    broadcastUsers(departed.roomId)
   })
   socket.on('error', () => socket.close())
 })

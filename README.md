@@ -1,10 +1,10 @@
 # EntreTelas — compartilhamento privado de tela
 
-Primeira versão funcional de compartilhamento de tela entre duas pessoas. O navegador do transmissor exige aceite, clique explícito e escolha manual da tela. O projeto não oferece controle remoto, clipboard, arquivos nem captura silenciosa.
+Primeira versão funcional de compartilhamento privado de tela. O navegador do transmissor exige clique explícito e escolha manual da tela. O projeto não oferece controle remoto, clipboard, arquivos nem captura silenciosa.
 
 O aplicativo aceita várias transmissões simultâneas: uma tela pode ser enviada para vários amigos, cada pessoa pode transmitir enquanto assiste outras telas, e o painel oferece tamanhos Pequeno, Médio e Grande, além de tela cheia por transmissão.
 
-O fluxo atual usa transmissões abertas dentro da sala: a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. A sala aceita no máximo cinco pessoas simultâneas. Quatro senhas administrativas opcionais dão acesso a controles de expulsar e banir usuários pelo nome; os banimentos ficam em memória até o próximo reinício do serviço.
+Qualquer pessoa pode criar uma sala com nome e senha. Quem não entrou nela não recebe nomes, presença, transmissões ou sinalização WebRTC. Dentro da sala, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores. Quatro senhas administrativas opcionais dão acesso a controles de expulsar e banir usuários pelo nome; os banimentos ficam em memória até o próximo reinício do serviço.
 
 ## Requisitos
 
@@ -23,7 +23,7 @@ npm install
 npm run dev
 ```
 
-Abra `http://localhost:5173` em duas janelas ou perfis do navegador, entre com nomes diferentes e solicite a tela.
+Abra `http://localhost:5173` em duas janelas ou perfis do navegador. Crie uma sala na primeira e entre usando o mesmo nome de sala e senha na segunda.
 
 ## Dois PCs na mesma rede (recomendado: HTTPS)
 
@@ -63,11 +63,13 @@ O arquivo `render.yaml` deixa o projeto pronto para o Render. Coloque esta pasta
 
 No plano gratuito, o serviço pode dormir após 15 minutos sem tráfego e levar cerca de um minuto para acordar. Ele é adequado para testes e uso ocasional, não para uma versão de produção.
 
-### Usuário e senha compartilhada
+### Salas privadas
 
-No Render, defina `ROOM_PASSWORD` com a senha que será compartilhada apenas entre seus amigos. O Blueprint gera `SESSION_SECRET` automaticamente. Cada amigo escolhe um nome de usuário diferente e usa a mesma senha. A sessão fica salva no navegador por 30 dias; depois disso, basta digitar a senha novamente. O servidor limita tentativas incorretas e não permite dois usuários online com o mesmo nome.
+O Blueprint gera `SESSION_SECRET` automaticamente. No site, qualquer usuário pode criar uma sala e escolher seu nome e senha. Os amigos precisam informar exatamente esses dois dados para entrar. A sessão da sala fica salva no navegador por até 30 dias, desde que a sala continue existindo. O servidor limita tentativas incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.
 
-Nunca coloque `ROOM_PASSWORD`, `SESSION_SECRET` nem o arquivo `.env` no Git.
+As salas ficam somente na memória nesta versão. Se o Render reiniciar ou adormecer o serviço gratuito, elas desaparecem e precisam ser criadas novamente; a interface descartará a sessão antiga na próxima tentativa. As senhas são armazenadas em memória com `scrypt`, salt individual e nunca são enviadas para outros participantes.
+
+Nunca coloque `SESSION_SECRET`, senhas administrativas nem o arquivo `.env` no Git.
 
 Defina também `ADMIN_PASSWORD_1` até `ADMIN_PASSWORD_4` no Render. Qualquer nome que entrar com uma dessas senhas recebe o perfil ADM.
 
@@ -103,10 +105,11 @@ As preferências são aplicadas nas constraints de `getDisplayMedia` e, quando o
 
 ## Limites e segurança desta primeira versão
 
-- Identidade por nome é apenas para desenvolvimento; não é autenticação.
-- Pedidos expiram em 60 segundos e a autorização vale somente para aquela sessão.
+- Identidade por nome é simples; o acesso à sala depende do conhecimento do nome e da senha.
+- Sessões são assinadas, vinculadas a uma única sala e expiram em até 30 dias.
 - O backend valida tipos, destinos, tamanho e formato básico das mensagens WebSocket.
-- Nenhuma mensagem remota consegue chamar `getDisplayMedia`; isso só ocorre no clique **Aceitar e escolher tela** do transmissor.
+- O servidor rejeita qualquer presença, moderação ou sinalização WebRTC destinada a outra sala.
+- Nenhuma mensagem remota consegue chamar `getDisplayMedia`; isso só ocorre no clique **Iniciar transmissão** do transmissor.
 - Ao parar, fechar a aba, perder o peer ou encerrar a captura nativa, tracks e `RTCPeerConnection` são fechados.
 - Cada espectador usa uma conexão WebRTC independente. A banda de upload do transmissor cresce aproximadamente uma vez por espectador; para grupos grandes, a evolução recomendada é usar uma SFU.
-- Para uso público real, adicione autenticação forte, salas com convite, limite de tentativas, logs mínimos e credenciais TURN temporárias.
+- Para uso público real, adicione contas persistentes, banco de dados, recuperação de salas e credenciais TURN temporárias.

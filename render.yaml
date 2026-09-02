@@ -12,8 +12,6 @@ services:
         value: 22
       - key: HOST
         value: 0.0.0.0
-      - key: ROOM_PASSWORD
-        sync: false
       - key: SESSION_SECRET
         generateValue: true
       - key: ADMIN_PASSWORD_1

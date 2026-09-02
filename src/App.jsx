@@ -15,18 +15,6 @@ const iceServers = () => {
   return servers
 }
 const audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
-const preferStereoOpus = (sdp) => {
-  const rtpmap = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i)
-  if (!rtpmap) return sdp
-  const payload = rtpmap[1]
-  const fmtp = new RegExp(`a=fmtp:${payload} ([^\\r\\n]*)`)
-  if (fmtp.test(sdp)) return sdp.replace(fmtp, (_line, params) => {
-    const kept = params.split(';').map((part) => part.trim()).filter((part) => part && !/^(stereo|sprop-stereo|maxaveragebitrate|useinbandfec)=/i.test(part))
-    return `a=fmtp:${payload} ${[...kept, 'stereo=1', 'sprop-stereo=1', 'useinbandfec=1', 'maxaveragebitrate=256000'].join(';')}`
-  })
-  return sdp.replace(rtpmap[0], `${rtpmap[0]}\r\na=fmtp:${payload} stereo=1;sprop-stereo=1;useinbandfec=1;maxaveragebitrate=256000`)
-}
-
 function RemoteScreen({ screen, name, size, onStop }) {
   const videoRef = useRef(null)
   const [muted, setMuted] = useState(false)
@@ -39,9 +27,10 @@ function RemoteScreen({ screen, name, size, onStop }) {
   useEffect(() => { const video = videoRef.current; if (!video) return; video.srcObject = screen.stream || null; if (screen.stream) play() }, [screen.stream, play])
   useEffect(() => { const video = videoRef.current; if (!video) return; video.muted = muted; video.volume = volume }, [muted, volume, screen.stream])
   const enableAudio = () => { const video = videoRef.current; if (!video) return; video.muted = false; setMuted(false); play() }
+  const goFullscreen = () => { const frame = videoRef.current?.parentElement; return frame?.requestFullscreen?.() || videoRef.current?.webkitEnterFullscreen?.() }
   return <article className={`screen-card size-${size}`}>
-    <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{screen.fps ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}</span></div><div><button title="Tela cheia" onClick={() => videoRef.current?.parentElement?.requestFullscreen?.()}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
-    <div className="remote-frame"><video ref={videoRef} autoPlay playsInline />{!screen.stream && <div className="video-placeholder overlay"><div className="spinner" /><strong>Aguardando a tela</strong></div>}{screen.hasAudio && audioBlocked && <button className="audio-unlock" onClick={enableAudio}><Volume2 size={16} />Ativar som</button>}</div>
+    <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{screen.fps ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
+    <div className="remote-frame" onDoubleClick={goFullscreen}><video ref={videoRef} autoPlay playsInline />{!screen.stream && <div className="video-placeholder overlay"><div className="spinner" /><strong>Aguardando a tela</strong></div>}{screen.hasAudio && audioBlocked && <button className="audio-unlock" onClick={enableAudio}><Volume2 size={16} />Ativar som</button>}</div>
     {screen.hasAudio && <div className="screen-audio"><button title={muted ? 'Ativar som' : 'Silenciar'} onClick={() => setMuted((current) => !current)}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0) }} aria-label={`Volume da tela de ${name}`} /><span>{Math.round((muted ? 0 : volume) * 100)}%</span></div>}
   </article>
 }
@@ -87,7 +76,7 @@ export default function App() {
     const entry = pcsRef.current.get(connectionId)
     if (!entry) return
     if (notify) send({ type: 'stop', to: entry.peerId, connectionId })
-    clearInterval(statsRef.current.get(connectionId)); statsRef.current.delete(connectionId)
+    clearInterval(statsRef.current.get(connectionId)); statsRef.current.delete(connectionId); clearTimeout(entry.disconnectTimer)
     entry.pc.close(); pcsRef.current.delete(connectionId)
     if (entry.role === 'viewer') setRemoteScreens((current) => { const next = { ...current }; delete next[connectionId]; return next })
     else setViewers((current) => { const next = { ...current }; delete next[connectionId]; return next })
@@ -107,9 +96,26 @@ export default function App() {
 
   const createPeer = useCallback((connectionId, peerId, role) => {
     const pc = new RTCPeerConnection({ iceServers: iceServers() })
-    const entry = { pc, peerId, role, pendingCandidates: [] }; pcsRef.current.set(connectionId, entry)
+    const entry = { pc, peerId, role, pendingCandidates: [], disconnectTimer: null, restarting: false }; pcsRef.current.set(connectionId, entry)
+    entry.restart = async () => {
+      if (entry.restarting || pc.signalingState !== 'stable' || pc.connectionState === 'closed') return
+      entry.restarting = true
+      try {
+        pc.restartIce()
+        const offer = await pc.createOffer({ iceRestart: true }); await pc.setLocalDescription(offer)
+        send({ type: 'signal', to: peerId, connectionId, description: pc.localDescription })
+      } catch { entry.restarting = false }
+    }
     pc.onicecandidate = ({ candidate }) => candidate && send({ type: 'signal', to: peerId, connectionId, candidate: candidate.toJSON() })
-    pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState) && pcsRef.current.get(connectionId)?.pc === pc) closeConnection(connectionId, false) }
+    pc.oniceconnectionstatechange = () => {
+      if (['connected', 'completed'].includes(pc.iceConnectionState)) { clearTimeout(entry.disconnectTimer); entry.disconnectTimer = null; entry.restarting = false }
+      if (pc.iceConnectionState === 'failed') role === 'transmitter' ? entry.restart() : send({ type: 'restart-request', to: peerId, connectionId })
+      if (pc.iceConnectionState === 'disconnected' && !entry.disconnectTimer) entry.disconnectTimer = setTimeout(() => {
+        entry.disconnectTimer = null
+        if (pc.iceConnectionState === 'disconnected') role === 'transmitter' ? entry.restart() : send({ type: 'restart-request', to: peerId, connectionId })
+      }, 5_000)
+    }
+    pc.onconnectionstatechange = () => { if (pc.connectionState === 'closed' && pcsRef.current.get(connectionId)?.pc === pc) closeConnection(connectionId, false) }
     return entry
   }, [closeConnection, send])
 
@@ -139,7 +145,7 @@ export default function App() {
       if (message.description) {
         await entry.pc.setRemoteDescription(message.description)
         for (const candidate of entry.pendingCandidates.splice(0)) await entry.pc.addIceCandidate(candidate)
-        if (message.description.type === 'offer') { const answer = await entry.pc.createAnswer(); await entry.pc.setLocalDescription({ type: answer.type, sdp: preferStereoOpus(answer.sdp) }); send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription }) }
+        if (message.description.type === 'offer') { const answer = await entry.pc.createAnswer(); await entry.pc.setLocalDescription(answer); send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription }) }
       } else if (message.candidate) {
         if (entry.pc.remoteDescription) await entry.pc.addIceCandidate(message.candidate); else entry.pendingCandidates.push(message.candidate)
       }
@@ -159,6 +165,7 @@ export default function App() {
       else if (message.type === 'users') setUsers(message.users)
       else if (message.type === 'watch-request') shareWith(message.from)
       else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); handleSignal(message) }
+      else if (message.type === 'restart-request') pcsRef.current.get(message.connectionId)?.restart?.()
       else if (message.type === 'stop') closeConnection(message.connectionId, false)
       else if (message.type === 'peer-left') { for (const [id, entry] of pcsRef.current) if (entry.peerId === message.id) closeConnection(id, false); setRemoteScreens((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value.peerId !== message.id))) }
       else if (message.type === 'kicked' || message.type === 'banned') { setAccessSession(''); setJoined(false); setNotice(message.type === 'banned' ? 'Você foi banido da sala.' : 'Você foi removido da sala.') }
@@ -218,9 +225,9 @@ export default function App() {
     const preset = resolutions[resolution]; const video = { frameRate: { ideal: fps, max: fps }, displaySurface: 'monitor' }
     if (preset.width) { video.width = { ideal: preset.width }; video.height = { ideal: preset.height } }
     let stream
-    const picker = { selfBrowserSurface: 'exclude', surfaceSwitching: 'include' }
+    const picker = { selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude' }
     if (shareAudio) {
-      try { stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: audioConstraints, systemAudio: 'include' }) }
+      try { stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: audioConstraints, systemAudio: 'include', windowAudio: 'window' }) }
       catch (error) {
         if (error?.name === 'NotAllowedError') throw error
         stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: true })
@@ -237,7 +244,7 @@ export default function App() {
       const stream = await getCapture(); send({ type: 'broadcast-start' })
       setNotice(!shareAudio ? 'Sua transmissão está disponível para todos na sala (sem áudio).'
         : stream.getAudioTracks().length ? 'Sua transmissão está disponível para todos na sala, com o áudio do que você escolheu compartilhar.'
-        : 'Transmissão iniciada, mas sem áudio. Janelas de aplicativo não permitem capturar som: escolha a tela inteira ou uma aba do navegador e marque a opção de compartilhar o áudio.')
+        : 'Transmissão iniciada, mas a origem escolhida não forneceu áudio. Tente uma aba ou use uma opção de áudio oferecida pelo navegador.')
     }
     catch (error) { setNotice(error?.name === 'NotAllowedError' ? 'Você cancelou a escolha da tela.' : 'Não foi possível iniciar a captura.') }
   }
@@ -252,7 +259,7 @@ export default function App() {
         const audioSender = entry.pc.addTrack(audioTrack, stream)
         try { const parameters = audioSender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = 256_000; await audioSender.setParameters(parameters) } catch { /* best effort */ }
       }
-      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription({ type: offer.type, sdp: preferStereoOpus(offer.sdp) }); send({ type: 'signal', to: peerId, connectionId, description: entry.pc.localDescription })
+      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, description: entry.pc.localDescription })
       setViewers((current) => ({ ...current, [connectionId]: { peerId } })); setNotice('Novo espectador conectado à sua transmissão.')
     } catch { setNotice('Não foi possível conectar o novo espectador.') }
   }
@@ -273,7 +280,7 @@ export default function App() {
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section><div className="workspace multi-workspace">
       <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length + 1}</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Compartilhe o nome e a senha desta sala com seus amigos.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions"><button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>{isAdmin && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>
       <section className="panel stage multi-stage"><div className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>
-      <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><label>FPS preferido</label><div className="segmented three">{[30, 60, 120].map((value) => <button type="button" className={fps === value ? 'selected' : ''} key={value} onClick={() => setFps(value)}>{value}</button>)}</div><p className="hint">120 FPS é uma preferência. O navegador, tela e GPU determinam o valor efetivo.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">O som segue exatamente o que você escolher na janela do navegador: tela inteira envia o áudio do sistema, uma aba envia só o áudio dela. Janelas de aplicativo não têm captura de som.</p><label>Bitrate por espectador</label><div className="quality-list">{Object.keys(bitrateLabels).map((key) => <button type="button" className={quality === key ? 'selected' : ''} key={key} onClick={() => setQuality(key)}><span>{bitrateLabels[key]}</span><small>{key === 'low' ? '2,5 Mbps' : key === 'medium' ? '8 Mbps' : key === 'high' ? '14 Mbps' : 'defina abaixo'}</small></button>)}</div>{quality === 'custom' && <label className="custom">Mbps<input type="number" min="0.5" max="100" step="0.5" value={customMbps} onChange={(event) => setCustomMbps(Math.min(100, Math.max(.5, Number(event.target.value))))} /></label>}</fieldset>{!localStreamRef.current && <button className="start-broadcast" onClick={startBroadcast}><Radio size={17} />Iniciar transmissão</button>}<div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
+      <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><label>FPS preferido</label><div className="segmented three">{[30, 60, 120].map((value) => <button type="button" className={fps === value ? 'selected' : ''} key={value} onClick={() => setFps(value)}>{value}</button>)}</div><p className="hint">120 FPS é uma preferência. O navegador, tela e GPU determinam o valor efetivo.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p><label>Bitrate por espectador</label><div className="quality-list">{Object.keys(bitrateLabels).map((key) => <button type="button" className={quality === key ? 'selected' : ''} key={key} onClick={() => setQuality(key)}><span>{bitrateLabels[key]}</span><small>{key === 'low' ? '2,5 Mbps' : key === 'medium' ? '8 Mbps' : key === 'high' ? '14 Mbps' : 'defina abaixo'}</small></button>)}</div>{quality === 'custom' && <label className="custom">Mbps<input type="number" min="0.5" max="100" step="0.5" value={customMbps} onChange={(event) => setCustomMbps(Math.min(100, Math.max(.5, Number(event.target.value))))} /></label>}</fieldset>{!localStreamRef.current && <button className="start-broadcast" onClick={startBroadcast}><Radio size={17} />Iniciar transmissão</button>}<div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
     </div>
   </main>
 }

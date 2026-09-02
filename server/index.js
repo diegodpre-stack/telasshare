@@ -129,7 +129,7 @@ const tls = process.env.TLS_CERT_PATH && process.env.TLS_KEY_PATH
 const server = tls ? createHttpsServer(tls, app) : createHttpServer(app)
 const wss = new WebSocketServer({ server, maxPayload: 128 * 1024 })
 const clients = new Map()
-const allowedTypes = new Set(['hello', 'broadcast-start', 'broadcast-stop', 'watch-request', 'moderate', 'signal', 'stop'])
+const allowedTypes = new Set(['hello', 'broadcast-start', 'broadcast-stop', 'watch-request', 'restart-request', 'moderate', 'signal', 'stop'])
 
 const safeSend = (socket, message) => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
@@ -185,6 +185,10 @@ wss.on('connection', (socket, request) => {
     if (message.type === 'watch-request') {
       if (!target.broadcasting) return safeSend(socket, { type: 'error', message: 'Esta transmissão não está mais disponível.' })
       return safeSend(target.socket, { type: 'watch-request', from: id, fromName: sender.name })
+    }
+    if (message.type === 'restart-request') {
+      if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })
+      return safeSend(target.socket, { type: 'restart-request', from: id, connectionId: message.connectionId })
     }
     if (message.type === 'moderate') {
       if (!['admin', 'superadmin'].includes(sender.role) || !['kick', 'ban'].includes(message.action)) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })

@@ -12,6 +12,7 @@
 .screen-audio{display:flex;align-items:center;gap:9px;padding:8px 11px;border-top:1px solid #ffffff12}
 .screen-audio button{display:flex;align-items:center;justify-content:center;width:29px;height:29px;flex:0 0 auto;border:1px solid #ffffff1f;background:#ffffff0d;color:inherit;border-radius:9px;cursor:pointer}
 .screen-audio button:hover{background:#ffffff1a}
+.login-links{display:grid;gap:14px;margin-top:25px}.login-links .trust-line{margin-top:0}.friend-site-button{display:flex;align-items:center;justify-content:center;gap:7px;border:1px solid #30465b;background:#112235;color:#a9bdcf;border-radius:10px;padding:10px 13px;font-size:11px;font-weight:700}.friend-site-button:hover{border-color:#4c718f;color:#e3eef7;background:#162b40}.login-links>.friend-site-button{width:100%}.external-site-modal .modal-actions button{width:100%}
 .screen-audio input[type=range]{flex:1 1 auto;min-width:0;accent-color:var(--accent,#41ca9f);cursor:pointer}
 .screen-audio span{flex:0 0 auto;font-size:11px;font-variant-numeric:tabular-nums;opacity:.65;min-width:32px;text-align:right}
 .audio-unlock{position:absolute;left:50%;bottom:13px;transform:translateX(-50%);display:flex;align-items:center;gap:7px;border:0;background:var(--accent,#41ca9f);color:#06261c;font-weight:700;font-size:12px;padding:9px 15px;border-radius:11px;cursor:pointer;z-index:2;box-shadow:0 6px 18px #0006}

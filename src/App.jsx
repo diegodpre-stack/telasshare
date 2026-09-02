@@ -154,24 +154,42 @@ export default function App() {
 
   useEffect(() => {
     if (!joined) return
-    const socketUrl = new URL(SIGNAL_URL); if (accessSession) socketUrl.searchParams.set('session', accessSession)
-    const socket = new WebSocket(socketUrl); socketRef.current = socket; setConnection('connecting')
-    socket.onopen = () => { setConnection('online'); socket.send(JSON.stringify({ type: 'hello', name })); setNotice('Conectado. Somente pessoas desta sala podem ver você.') }
-    socket.onclose = (event) => { setConnection('offline'); setUsers([]); closeAll(); if (event.code === 1008) { setAccessSession(''); setJoined(false) }; setNotice('Conexão encerrada. Entre novamente para reconectar.') }
-    socket.onerror = () => setNotice('Falha ao conectar ao servidor de sinalização.')
-    socket.onmessage = ({ data }) => {
-      let message; try { message = JSON.parse(data) } catch { return }
-      if (message.type === 'welcome') { setSelfId(message.id); setIsAdmin(['admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName) }
-      else if (message.type === 'users') setUsers(message.users)
-      else if (message.type === 'watch-request') shareWith(message.from)
-      else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); handleSignal(message) }
-      else if (message.type === 'restart-request') pcsRef.current.get(message.connectionId)?.restart?.()
-      else if (message.type === 'stop') closeConnection(message.connectionId, false)
-      else if (message.type === 'peer-left') { for (const [id, entry] of pcsRef.current) if (entry.peerId === message.id) closeConnection(id, false); setRemoteScreens((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value.peerId !== message.id))) }
-      else if (message.type === 'kicked' || message.type === 'banned') { setAccessSession(''); setJoined(false); setNotice(message.type === 'banned' ? 'Você foi banido da sala.' : 'Você foi removido da sala.') }
-      else if (message.type === 'error') setNotice(message.message)
+    let disposed = false; let reconnectAttempt = 0; let reconnectTimer; let heartbeatTimer
+    const connect = () => {
+      if (disposed) return
+      const socketUrl = new URL(SIGNAL_URL); if (accessSession) socketUrl.searchParams.set('session', accessSession)
+      const socket = new WebSocket(socketUrl); socketRef.current = socket; setConnection('connecting')
+      socket.onopen = () => {
+        if (disposed) return socket.close()
+        reconnectAttempt = 0; setConnection('online'); socket.send(JSON.stringify({ type: 'hello', name }))
+        clearInterval(heartbeatTimer); heartbeatTimer = setInterval(() => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'heartbeat' })) }, 20_000)
+        setNotice('Conectado. Somente pessoas desta sala podem ver você.')
+      }
+      socket.onclose = (event) => {
+        clearInterval(heartbeatTimer)
+        if (disposed) return
+        if (socketRef.current === socket) socketRef.current = null
+        if (event.code === 1008) { setConnection('offline'); setUsers([]); closeAll(); setAccessSession(''); setJoined(false); setNotice('Sua entrada na sala expirou. Entre novamente.'); return }
+        const delay = Math.min(1_000 * (2 ** reconnectAttempt++), 10_000)
+        setConnection('connecting'); setNotice('Sinalização interrompida. Reconectando sem encerrar as transmissões…')
+        reconnectTimer = setTimeout(connect, delay)
+      }
+      socket.onerror = () => { if (!disposed) setNotice('Oscilação no servidor de sinalização. Tentando reconectar…') }
+      socket.onmessage = ({ data }) => {
+        let message; try { message = JSON.parse(data) } catch { return }
+        if (message.type === 'welcome') { setSelfId(message.id); setIsAdmin(['admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName) }
+        else if (message.type === 'users') setUsers(message.users)
+        else if (message.type === 'watch-request') shareWith(message.from)
+        else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); handleSignal(message) }
+        else if (message.type === 'restart-request') pcsRef.current.get(message.connectionId)?.restart?.()
+        else if (message.type === 'stop') closeConnection(message.connectionId, false)
+        else if (message.type === 'peer-left') { for (const [id, entry] of pcsRef.current) if (entry.peerId === message.id) closeConnection(id, false); setRemoteScreens((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value.peerId !== message.id))) }
+        else if (message.type === 'kicked' || message.type === 'banned') { setAccessSession(''); setJoined(false); setNotice(message.type === 'banned' ? 'Você foi banido da sala.' : 'Você foi removido da sala.') }
+        else if (message.type === 'error') setNotice(message.message)
+      }
     }
-    return () => { socket.close(); socketRef.current = null; closeAll() }
+    connect()
+    return () => { disposed = true; clearTimeout(reconnectTimer); clearInterval(heartbeatTimer); socketRef.current?.close(); socketRef.current = null; closeAll() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joined])
 

@@ -129,7 +129,7 @@ const tls = process.env.TLS_CERT_PATH && process.env.TLS_KEY_PATH
 const server = tls ? createHttpsServer(tls, app) : createHttpServer(app)
 const wss = new WebSocketServer({ server, maxPayload: 128 * 1024 })
 const clients = new Map()
-const allowedTypes = new Set(['hello', 'broadcast-start', 'broadcast-stop', 'watch-request', 'restart-request', 'moderate', 'signal', 'stop'])
+const allowedTypes = new Set(['hello', 'heartbeat', 'broadcast-start', 'broadcast-stop', 'watch-request', 'restart-request', 'moderate', 'signal', 'stop'])
 
 const safeSend = (socket, message) => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
@@ -156,7 +156,7 @@ wss.on('connection', (socket, request) => {
   const authenticated = verifySession(sessionToken)
   const room = authenticated ? rooms.get(authenticated.roomKey) : null
   if (!authenticated || authenticated.kind !== 'room' || !room || room.id !== authenticated.roomId) { socket.close(1008, 'Entrada na sala necessária'); return }
-  const id = crypto.randomUUID()
+  const id = authenticated.sub
   let registered = false
   socket.on('message', (raw) => {
     let message
@@ -167,7 +167,9 @@ wss.on('connection', (socket, request) => {
       const name = cleanUserName(authenticated.name)
       if (name.length < 2) return safeSend(socket, { type: 'error', message: 'Use um nome com pelo menos 2 caracteres.' })
       if (room.bannedNames.has(name.toLocaleLowerCase('pt-BR'))) { safeSend(socket, { type: 'banned' }); return socket.close(1008, 'Banido') }
-      if (roomClients(room.id).some((client) => client.name.toLocaleLowerCase('pt-BR') === name.toLocaleLowerCase('pt-BR'))) {
+      const previousConnection = clients.get(id)
+      if (previousConnection && previousConnection.socket !== socket) { clients.delete(id); previousConnection.socket.close(1012, 'Reconectado em outra conexão') }
+      if (roomClients(room.id).some((client) => client.id !== id && client.name.toLocaleLowerCase('pt-BR') === name.toLocaleLowerCase('pt-BR'))) {
         safeSend(socket, { type: 'error', message: 'Este nome de usuário já está online.' }); return socket.close(1008, 'Nome em uso')
       }
       clients.set(id, { id, name, role: ['admin', 'superadmin'].includes(authenticated.role) ? authenticated.role : 'member', roomId: room.id, broadcasting: false, socket })
@@ -177,6 +179,8 @@ wss.on('connection', (socket, request) => {
       return broadcastUsers(room.id)
     }
     const sender = clients.get(id)
+    if (!sender || sender.socket !== socket) return socket.close(1012, 'Conexão substituída')
+    if (message.type === 'heartbeat') return safeSend(socket, { type: 'heartbeat', at: Date.now() })
     if (message.type === 'broadcast-start') { sender.broadcasting = true; return broadcastUsers(sender.roomId) }
     if (message.type === 'broadcast-stop') { sender.broadcasting = false; return broadcastUsers(sender.roomId) }
     const target = typeof message.to === 'string' ? clients.get(message.to) : null
@@ -210,7 +214,7 @@ wss.on('connection', (socket, request) => {
     }
   })
   socket.on('close', () => {
-    if (!registered) return
+    if (!registered || clients.get(id)?.socket !== socket) return
     const departed = clients.get(id); clients.delete(id)
     for (const { socket: peerSocket } of roomClients(departed.roomId)) safeSend(peerSocket, { type: 'peer-left', id })
     broadcastUsers(departed.roomId)

@@ -7,7 +7,7 @@ const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL || `${location.protocol === '
 const resolutions = { auto: { label: 'Auto' }, '720p': { label: '720p', width: 1280, height: 720 }, '1080p': { label: '1080p', width: 1920, height: 1080 }, '1440p': { label: '1440p', width: 2560, height: 1440 } }
 const bitratePresets = { low: 2_500_000, medium: 8_000_000, high: 14_000_000 }
 const bitrateLabels = { low: 'Baixa', medium: 'Média', high: 'Alta', custom: 'Personalizada' }
-const iceServers = () => {
+const staticIceServers = () => {
   const stun = (import.meta.env.VITE_STUN_URLS || 'stun:stun.l.google.com:19302').split(',').map((v) => v.trim()).filter(Boolean)
   const turn = (import.meta.env.VITE_TURN_URLS || '').split(',').map((v) => v.trim()).filter(Boolean)
   const servers = stun.length ? [{ urls: stun }] : []
@@ -68,6 +68,7 @@ export default function App() {
   const [audioStatus, setAudioStatus] = useState('idle')
   const socketRef = useRef(null)
   const pcsRef = useRef(new Map())
+  const iceServersRef = useRef(staticIceServers())
   const localStreamRef = useRef(null)
   const statsRef = useRef(new Map())
   const send = useCallback((message) => { if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message)) }, [])
@@ -95,7 +96,7 @@ export default function App() {
   }, [closeConnection])
 
   const createPeer = useCallback((connectionId, peerId, role) => {
-    const pc = new RTCPeerConnection({ iceServers: iceServers() })
+    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current, iceTransportPolicy: 'all' })
     const entry = { pc, peerId, role, pendingCandidates: [], disconnectTimer: null, restarting: false }; pcsRef.current.set(connectionId, entry)
     entry.restart = async () => {
       if (entry.restarting || pc.signalingState !== 'stable' || pc.connectionState === 'closed') return
@@ -224,6 +225,11 @@ export default function App() {
     try {
       const response = await fetch(`/api/rooms/${encodeURIComponent(room.id)}/join`, { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ password: chosenPassword }) }); const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Não foi possível entrar na sala.')
+      try {
+        const iceResponse = await fetch('/api/ice-servers', { headers: { authorization: `Bearer ${result.session}` } })
+        const iceResult = await iceResponse.json()
+        if (iceResponse.ok && Array.isArray(iceResult.iceServers) && iceResult.iceServers.length) iceServersRef.current = iceResult.iceServers
+      } catch { /* STUN/P2P remains available when TURN configuration is unavailable */ }
       setAccessSession(result.session); setRoomName(result.roomName); setRoomPassword(''); setSelectedRoom(null); setJoined(true)
     } catch (error) { setAccessError(error.message) } finally { setJoining(false) }
   }

@@ -22,3 +22,7 @@ services:
         sync: false
       - key: ADMIN_PASSWORD_4
         sync: false
+      - key: CLOUDFLARE_TURN_KEY_ID
+        sync: false
+      - key: CLOUDFLARE_TURN_API_TOKEN
+        sync: false

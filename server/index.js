@@ -20,6 +20,7 @@ const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_
 const loginAttempts = new Map()
 const rooms = new Map()
 const ROOM_SESSION_MS = 30 * 24 * 60 * 60 * 1000
+const TURN_CREDENTIAL_TTL_SECONDS = 24 * 60 * 60
 const normalizeRoomName = (value) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 40) : ''
 const roomKey = (name) => name.toLocaleLowerCase('pt-BR')
 const hashPassword = (password, salt = crypto.randomBytes(16).toString('base64url')) => ({
@@ -116,6 +117,35 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
   loginAttempts.delete(attempt.ip)
   scheduleRoomDeletion(room, entry[0])
   res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: authenticated.role, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: authenticated.role, roomName: room.name })
+})
+
+app.get('/api/ice-servers', async (req, res) => {
+  const authenticated = readBearerSession(req, 'room')
+  const room = authenticated ? rooms.get(authenticated.roomKey) : null
+  if (!authenticated || !room || room.id !== authenticated.roomId) return res.status(401).json({ error: 'Entre em uma sala novamente.' })
+
+  res.set('Cache-Control', 'no-store')
+  const fallback = [{ urls: ['stun:stun.l.google.com:19302'] }]
+  const turnKeyId = process.env.CLOUDFLARE_TURN_KEY_ID
+  const turnApiToken = process.env.CLOUDFLARE_TURN_API_TOKEN
+  if (!turnKeyId || !turnApiToken) return res.json({ iceServers: fallback, turnEnabled: false })
+
+  try {
+    const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(turnKeyId)}/credentials/generate-ice-servers`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${turnApiToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ ttl: TURN_CREDENTIAL_TTL_SECONDS }),
+      signal: AbortSignal.timeout(8_000),
+    })
+    const result = await response.json()
+    if (!response.ok || !Array.isArray(result.iceServers) || result.iceServers.length === 0) throw new Error('TURN credentials unavailable')
+    const iceServers = result.iceServers.filter((serverEntry) => serverEntry && (typeof serverEntry.urls === 'string' || Array.isArray(serverEntry.urls)))
+    if (iceServers.length === 0) throw new Error('Invalid TURN response')
+    return res.json({ iceServers, turnEnabled: iceServers.some((entry) => JSON.stringify(entry.urls).includes('turn:') || JSON.stringify(entry.urls).includes('turns:')) })
+  } catch (error) {
+    console.error('Could not generate temporary TURN credentials:', error.message)
+    return res.json({ iceServers: fallback, turnEnabled: false })
+  }
 })
 
 const here = dirname(fileURLToPath(import.meta.url))

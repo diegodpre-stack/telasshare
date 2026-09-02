@@ -159,7 +159,12 @@ export default function App() {
       if (!response.ok) throw new Error(); setRooms(result.rooms || []); setSiteRole(result.role || 'member')
     } catch { setAccessError('Não foi possível carregar as salas agora.') }
   }, [authHeaders])
-  useEffect(() => { if (siteSession && !joined) loadRooms() }, [siteSession, joined, loadRooms])
+  useEffect(() => {
+    if (!siteSession || joined) return
+    loadRooms()
+    const timer = setInterval(loadRooms, 3_000)
+    return () => clearInterval(timer)
+  }, [siteSession, joined, loadRooms])
   const joinRoom = async (room, chosenPassword = roomPassword) => {
     setJoining(true); setAccessError('')
     try {

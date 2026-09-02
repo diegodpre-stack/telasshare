@@ -95,8 +95,9 @@ app.post('/api/rooms', (req, res) => {
   if (roomName.length < 2 || password.length < 4 || password.length > 128) return res.status(400).json({ error: 'Informe um nome e uma senha com pelo menos 4 caracteres.' })
   const key = roomKey(roomName)
   if (rooms.has(key)) return res.status(409).json({ error: 'Não foi possível criar essa sala. Escolha outro nome.' })
-  const room = { id: crypto.randomUUID(), name: roomName, password: hashPassword(password), bannedNames: new Set(), createdAt: Date.now() }
+  const room = { id: crypto.randomUUID(), name: roomName, password: hashPassword(password), bannedNames: new Set(), createdAt: Date.now(), deleteTimer: null }
   rooms.set(key, room)
+  scheduleRoomDeletion(room, key)
   res.status(201).json({ room: { id: room.id, name: room.name } })
 })
 
@@ -113,6 +114,7 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
     return res.status(401).json({ error: 'Senha da sala incorreta.' })
   }
   loginAttempts.delete(attempt.ip)
+  scheduleRoomDeletion(room, entry[0])
   res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: authenticated.role, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: authenticated.role, roomName: room.name })
 })
 
@@ -137,6 +139,12 @@ const publicUsers = (roomId) => roomClients(roomId).map(({ id, name, role, broad
 const broadcastUsers = (roomId) => {
   const message = { type: 'users', users: publicUsers(roomId) }
   for (const { socket } of roomClients(roomId)) safeSend(socket, message)
+}
+const scheduleRoomDeletion = (room, key) => {
+  clearTimeout(room.deleteTimer)
+  room.deleteTimer = setTimeout(() => {
+    if (roomClients(room.id).length === 0 && rooms.get(key)?.id === room.id) rooms.delete(key)
+  }, 15_000)
 }
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const validDescription = (value) => isObject(value) && ['offer', 'answer'].includes(value.type) && typeof value.sdp === 'string' && value.sdp.length < 100_000
@@ -163,6 +171,7 @@ wss.on('connection', (socket, request) => {
         safeSend(socket, { type: 'error', message: 'Este nome de usuário já está online.' }); return socket.close(1008, 'Nome em uso')
       }
       clients.set(id, { id, name, role: ['admin', 'superadmin'].includes(authenticated.role) ? authenticated.role : 'member', roomId: room.id, broadcasting: false, socket })
+      clearTimeout(room.deleteTimer); room.deleteTimer = null
       registered = true
       safeSend(socket, { type: 'welcome', id, role: ['admin', 'superadmin'].includes(authenticated.role) ? authenticated.role : 'member', roomName: room.name })
       return broadcastUsers(room.id)
@@ -201,6 +210,7 @@ wss.on('connection', (socket, request) => {
     const departed = clients.get(id); clients.delete(id)
     for (const { socket: peerSocket } of roomClients(departed.roomId)) safeSend(peerSocket, { type: 'peer-left', id })
     broadcastUsers(departed.roomId)
+    if (roomClients(departed.roomId).length === 0) scheduleRoomDeletion(room, authenticated.roomKey)
   })
   socket.on('error', () => socket.close())
 })

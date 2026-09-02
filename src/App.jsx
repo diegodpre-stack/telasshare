@@ -218,13 +218,14 @@ export default function App() {
     const preset = resolutions[resolution]; const video = { frameRate: { ideal: fps, max: fps } }
     if (preset.width) { video.width = { ideal: preset.width }; video.height = { ideal: preset.height } }
     let stream
+    const picker = { selfBrowserSurface: 'exclude', surfaceSwitching: 'include' }
     if (shareAudio) {
-      try { stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: audioConstraints, systemAudio: 'include' }) }
+      try { stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: audioConstraints, systemAudio: 'include' }) }
       catch (error) {
         if (error?.name === 'NotAllowedError') throw error
         stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: true })
       }
-    } else stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false })
+    } else stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: false })
     localStreamRef.current = stream
     const audioTrack = stream.getAudioTracks()[0]
     setAudioStatus(audioTrack ? 'on' : shareAudio ? 'unavailable' : 'off')

@@ -4,6 +4,8 @@ Primeira versão funcional de compartilhamento de tela entre duas pessoas. O nav
 
 O aplicativo aceita várias transmissões simultâneas: uma tela pode ser enviada para vários amigos, cada pessoa pode transmitir enquanto assiste outras telas, e o painel oferece tamanhos Pequeno, Médio e Grande, além de tela cheia por transmissão.
 
+O fluxo atual usa transmissões abertas dentro da sala: a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. A sala aceita no máximo cinco pessoas simultâneas. Quatro senhas administrativas opcionais dão acesso a controles de expulsar e banir usuários pelo nome; os banimentos ficam em memória até o próximo reinício do serviço.
+
 ## Requisitos
 
 - Node.js 20 ou mais recente
@@ -66,6 +68,8 @@ No plano gratuito, o serviço pode dormir após 15 minutos sem tráfego e levar 
 No Render, defina `ROOM_PASSWORD` com a senha que será compartilhada apenas entre seus amigos. O Blueprint gera `SESSION_SECRET` automaticamente. Cada amigo escolhe um nome de usuário diferente e usa a mesma senha. A sessão fica salva no navegador por 30 dias; depois disso, basta digitar a senha novamente. O servidor limita tentativas incorretas e não permite dois usuários online com o mesmo nome.
 
 Nunca coloque `ROOM_PASSWORD`, `SESSION_SECRET` nem o arquivo `.env` no Git.
+
+Defina também `ADMIN_PASSWORD_1` até `ADMIN_PASSWORD_4` no Render. Qualquer nome que entrar com uma dessas senhas recebe o perfil ADM.
 
 1. Publique o frontend com HTTPS e defina `VITE_SIGNAL_URL=wss://seu-dominio-de-sinalizacao` antes de `npm run build`.
 2. Publique o servidor Node em uma hospedagem que aceite WebSocket e configure `CLIENT_ORIGIN=https://seu-frontend`.

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Cast, Check, CircleStop, Expand, MonitorUp, Radio, ShieldCheck, SlidersHorizontal, Users, Wifi, WifiOff, X } from 'lucide-react'
+import { Ban, Cast, CircleStop, Expand, MonitorUp, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
 const defaultSignalHost = localHost ? `${location.hostname}:8787` : location.host
@@ -33,9 +33,8 @@ export default function App() {
   const [joined, setJoined] = useState(false)
   const [connection, setConnection] = useState('offline')
   const [selfId, setSelfId] = useState('')
+  const [isAdmin, setIsAdmin] = useState(false)
   const [users, setUsers] = useState([])
-  const [incomingQueue, setIncomingQueue] = useState([])
-  const [outgoing, setOutgoing] = useState(null)
   const [remoteScreens, setRemoteScreens] = useState({})
   const [viewers, setViewers] = useState({})
   const [notice, setNotice] = useState('Entre com um nome para aparecer para seus amigos.')
@@ -48,7 +47,6 @@ export default function App() {
   const pcsRef = useRef(new Map())
   const localStreamRef = useRef(null)
   const statsRef = useRef(new Map())
-  const incoming = incomingQueue[0] || null
   const send = useCallback((message) => { if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message)) }, [])
 
   const closeConnection = useCallback((connectionId, notify = false) => {
@@ -64,8 +62,8 @@ export default function App() {
   const stopSharing = useCallback((notify = true) => {
     for (const [id, entry] of pcsRef.current) if (entry.role === 'transmitter') closeConnection(id, notify)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
-    setViewers({}); setNotice('Sua transmissão foi encerrada. As telas que você assiste continuam abertas.')
-  }, [closeConnection])
+    send({ type: 'broadcast-stop' }); setViewers({}); setNotice('Sua transmissão foi encerrada. As telas que você assiste continuam abertas.')
+  }, [closeConnection, send])
   const closeAll = useCallback(() => {
     for (const id of [...pcsRef.current.keys()]) closeConnection(id, false)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
@@ -118,17 +116,13 @@ export default function App() {
     socket.onerror = () => setNotice('Falha ao conectar ao servidor de sinalização.')
     socket.onmessage = ({ data }) => {
       let message; try { message = JSON.parse(data) } catch { return }
-      if (message.type === 'welcome') setSelfId(message.id)
+      if (message.type === 'welcome') { setSelfId(message.id); setIsAdmin(message.role === 'admin') }
       else if (message.type === 'users') setUsers(message.users)
-      else if (message.type === 'share-request') { setIncomingQueue((current) => [...current, message]); setNotice(`${message.fromName} quer ver sua tela.`) }
-      else if (message.type === 'request-expired') setIncomingQueue((current) => current.filter((item) => item.requestId !== message.requestId))
-      else if (message.type === 'share-response') {
-        setOutgoing(null)
-        if (message.accepted) { setNotice('Pedido aceito. Aguardando seu amigo escolher a tela.'); setRemoteScreens((current) => ({ ...current, [`waiting-${message.from}`]: { peerId: message.from, waiting: true, stream: null } })) }
-        else setNotice(message.reason === 'expired' ? 'O pedido expirou.' : 'Seu amigo recusou o compartilhamento.')
-      } else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); handleSignal(message) }
+      else if (message.type === 'watch-request') shareWith(message.from)
+      else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); handleSignal(message) }
       else if (message.type === 'stop') closeConnection(message.connectionId, false)
       else if (message.type === 'peer-left') { for (const [id, entry] of pcsRef.current) if (entry.peerId === message.id) closeConnection(id, false); setRemoteScreens((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value.peerId !== message.id))) }
+      else if (message.type === 'kicked' || message.type === 'banned' || message.type === 'room-full') { if (message.type !== 'room-full') { localStorage.removeItem('screen-share-session'); setAccessSession('') }; setJoined(false); setNotice(message.type === 'banned' ? 'Você foi banido da sala.' : message.type === 'kicked' ? 'Você foi removido da sala.' : 'A sala está cheia (máximo de 5 pessoas).') }
       else if (message.type === 'error') setNotice(message.message)
     }
     return () => { socket.close(); socketRef.current = null; closeAll() }
@@ -149,8 +143,6 @@ export default function App() {
     } catch (error) { setAccessError(error.message) } finally { setJoining(false) }
   }
 
-  const requestShare = (user) => { send({ type: 'share-request', to: user.id }); setOutgoing(user); setNotice(`Pedido enviado para ${user.name}.`) }
-  const reject = () => { send({ type: 'share-response', to: incoming.from, requestId: incoming.requestId, accepted: false }); setIncomingQueue((current) => current.slice(1)); setNotice('Solicitação recusada.') }
   const getCapture = async () => {
     if (localStreamRef.current?.getVideoTracks()[0]?.readyState === 'live') return localStreamRef.current
     const preset = resolutions[resolution]; const video = { frameRate: { ideal: fps, max: fps }, displaySurface: 'monitor' }
@@ -158,18 +150,22 @@ export default function App() {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false }); localStreamRef.current = stream
     stream.getVideoTracks()[0].onended = () => stopSharing(true); return stream
   }
-  const acceptAndShare = async () => {
-    const request = incoming; if (!request) return
-    setIncomingQueue((current) => current.slice(1))
+  const startBroadcast = async () => {
+    try { await getCapture(); send({ type: 'broadcast-start' }); setNotice('Sua transmissão está disponível para todos na sala.') }
+    catch (error) { setNotice(error?.name === 'NotAllowedError' ? 'Você cancelou a escolha da tela.' : 'Não foi possível iniciar a captura.') }
+  }
+  const shareWith = async (peerId) => {
     try {
-      const stream = await getCapture(); send({ type: 'share-response', to: request.from, requestId: request.requestId, accepted: true })
-      const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, request.from, 'transmitter'); const track = stream.getVideoTracks()[0]
+      const stream = localStreamRef.current; if (!stream) return
+      const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter'); const track = stream.getVideoTracks()[0]
       const sender = entry.pc.addTrack(track, stream); const maxBitrate = quality === 'custom' ? Math.round(customMbps * 1_000_000) : bitratePresets[quality]
       try { const parameters = sender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = maxBitrate; parameters.encodings[0].maxFramerate = fps; await sender.setParameters(parameters) } catch { /* best effort */ }
-      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: request.from, connectionId, description: entry.pc.localDescription })
-      setViewers((current) => ({ ...current, [connectionId]: { peerId: request.from } })); setNotice('Novo espectador conectado à sua transmissão.')
-    } catch (error) { send({ type: 'share-response', to: request.from, requestId: request.requestId, accepted: false }); setNotice(error?.name === 'NotAllowedError' ? 'Você cancelou a escolha da tela.' : 'Não foi possível iniciar a captura.') }
+      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, description: entry.pc.localDescription })
+      setViewers((current) => ({ ...current, [connectionId]: { peerId } })); setNotice('Novo espectador conectado à sua transmissão.')
+    } catch { setNotice('Não foi possível conectar o novo espectador.') }
   }
+  const watch = (user) => { setRemoteScreens((current) => ({ ...current, [`waiting-${user.id}`]: { peerId: user.id, waiting: true } })); send({ type: 'watch-request', to: user.id }); setNotice(`Conectando à tela de ${user.name}…`) }
+  const moderate = (user, action) => send({ type: 'moderate', to: user.id, action })
 
   const peers = useMemo(() => users.filter((user) => user.id !== selfId), [users, selfId])
   const userName = (id) => users.find((user) => user.id === id)?.name || 'amigo'
@@ -181,11 +177,9 @@ export default function App() {
   return <main className="shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>EntreTelas</strong><span>compartilhamento privado</span></div></div><div className={`connection ${connection}`}><span className="pulse" />{connection === 'online' ? <Wifi size={15} /> : <WifiOff size={15} />}{connection === 'online' ? 'Conectado' : connection === 'connecting' ? 'Conectando' : 'Offline'}</div></header>
     {localStreamRef.current && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {resolutions[resolution].label} · preferência {fps} FPS</span></div><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section><div className="workspace multi-workspace">
-      <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length}</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Abra o app no outro computador e entre com outro nome.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}</strong><span><i /> online agora</span></div><button disabled={outgoing?.id === user.id || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => requestShare(user)}><Cast size={16} />Ver tela</button></article>)}</div></section>
+      <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · máximo 5</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length + 1}/5</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Envie o link para seus amigos entrarem.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.role === 'admin' ? ' · ADM' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions"><button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>{isAdmin && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>
       <section className="panel stage multi-stage"><div className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>
-      <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Antes de transmitir</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><label>FPS preferido</label><div className="segmented three">{[30, 60, 120].map((value) => <button type="button" className={fps === value ? 'selected' : ''} key={value} onClick={() => setFps(value)}>{value}</button>)}</div><p className="hint">120 FPS é uma preferência. O navegador, tela e GPU determinam o valor efetivo.</p><label>Bitrate por espectador</label><div className="quality-list">{Object.keys(bitrateLabels).map((key) => <button type="button" className={quality === key ? 'selected' : ''} key={key} onClick={() => setQuality(key)}><span>{bitrateLabels[key]}</span><small>{key === 'low' ? '2,5 Mbps' : key === 'medium' ? '8 Mbps' : key === 'high' ? '14 Mbps' : 'defina abaixo'}</small></button>)}</div>{quality === 'custom' && <label className="custom">Mbps<input type="number" min="0.5" max="100" step="0.5" value={customMbps} onChange={(event) => setCustomMbps(Math.min(100, Math.max(.5, Number(event.target.value))))} /></label>}</fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Transmissões independentes</strong><span>Você pode enviar e receber ao mesmo tempo.</span></p></div></aside>
+      <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><label>FPS preferido</label><div className="segmented three">{[30, 60, 120].map((value) => <button type="button" className={fps === value ? 'selected' : ''} key={value} onClick={() => setFps(value)}>{value}</button>)}</div><p className="hint">120 FPS é uma preferência. O navegador, tela e GPU determinam o valor efetivo.</p><label>Bitrate por espectador</label><div className="quality-list">{Object.keys(bitrateLabels).map((key) => <button type="button" className={quality === key ? 'selected' : ''} key={key} onClick={() => setQuality(key)}><span>{bitrateLabels[key]}</span><small>{key === 'low' ? '2,5 Mbps' : key === 'medium' ? '8 Mbps' : key === 'high' ? '14 Mbps' : 'defina abaixo'}</small></button>)}</div>{quality === 'custom' && <label className="custom">Mbps<input type="number" min="0.5" max="100" step="0.5" value={customMbps} onChange={(event) => setCustomMbps(Math.min(100, Math.max(.5, Number(event.target.value))))} /></label>}</fieldset>{!localStreamRef.current && <button className="start-broadcast" onClick={startBroadcast}><Radio size={17} />Iniciar transmissão</button>}<div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
     </div>
-    {outgoing && <div className="modal-backdrop"><div className="modal"><div className="spinner" /><p className="eyebrow">Pedido enviado</p><h3>Aguardando {outgoing.name}</h3><p>Seu amigo precisa aceitar. Sua transmissão atual continua normalmente.</p><button className="secondary" onClick={() => setOutgoing(null)}>Fechar</button></div></div>}
-    {incoming && <div className="modal-backdrop"><div className="modal request"><div className="request-icon"><Cast size={25} /></div><p className="eyebrow">Solicitação recebida{incomingQueue.length > 1 ? ` · mais ${incomingQueue.length - 1}` : ''}</p><h3>{incoming.fromName} quer ver sua tela</h3><p>{localStreamRef.current ? 'Sua tela já está sendo capturada. Aceitar adicionará este amigo como espectador.' : 'A captura só será aberta se você aceitar e escolher a tela.'}</p><div className="modal-actions"><button className="secondary" onClick={reject}><X size={17} />Recusar</button><button onClick={acceptAndShare}><Check size={17} />{localStreamRef.current ? 'Aceitar e adicionar' : 'Aceitar e escolher tela'}</button></div></div></div>}
   </main>
 }

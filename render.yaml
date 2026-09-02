@@ -16,3 +16,11 @@ services:
         sync: false
       - key: SESSION_SECRET
         generateValue: true
+      - key: ADMIN_PASSWORD_1
+        sync: false
+      - key: ADMIN_PASSWORD_2
+        sync: false
+      - key: ADMIN_PASSWORD_3
+        sync: false
+      - key: ADMIN_PASSWORD_4
+        sync: false

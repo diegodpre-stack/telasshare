@@ -17,6 +17,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }))
 
 const sessionSecret = process.env.SESSION_SECRET || (!process.env.RENDER ? 'local-development-session-secret' : '')
 const roomPassword = process.env.ROOM_PASSWORD || (!process.env.RENDER ? 'entretelas' : '')
+const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_${number}`]).filter(Boolean)
 const loginAttempts = new Map()
 const signSession = (payload) => {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
@@ -41,10 +42,12 @@ app.post('/api/login', (req, res) => {
   if (recent.length >= 10) return res.status(429).json({ error: 'Muitas tentativas. Aguarde dez minutos.' })
   const name = typeof req.body?.name === 'string' ? req.body.name.trim().replace(/\s+/g, ' ').slice(0, 32) : ''
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
-  const valid = password.length === roomPassword.length && crypto.timingSafeEqual(Buffer.from(password), Buffer.from(roomPassword))
+  const matches = (expected) => password.length === expected.length && crypto.timingSafeEqual(Buffer.from(password), Buffer.from(expected))
+  const role = adminPasswords.some(matches) ? 'admin' : 'member'
+  const valid = role === 'admin' || matches(roomPassword)
   if (name.length < 2 || !valid) { recent.push(now); loginAttempts.set(ip, recent); return res.status(401).json({ error: 'Usuário ou senha incorretos.' }) }
   loginAttempts.delete(ip)
-  res.json({ session: signSession({ sub: crypto.randomUUID(), name, exp: now + 30 * 24 * 60 * 60 * 1000 }) })
+  res.json({ session: signSession({ sub: crypto.randomUUID(), name, role, exp: now + 30 * 24 * 60 * 60 * 1000 }), role })
 })
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -58,13 +61,13 @@ const tls = process.env.TLS_CERT_PATH && process.env.TLS_KEY_PATH
 const server = tls ? createHttpsServer(tls, app) : createHttpServer(app)
 const wss = new WebSocketServer({ server, maxPayload: 128 * 1024 })
 const clients = new Map()
-const pendingRequests = new Map()
-const allowedTypes = new Set(['hello', 'share-request', 'share-response', 'signal', 'stop'])
+const bannedNames = new Set()
+const allowedTypes = new Set(['hello', 'broadcast-start', 'broadcast-stop', 'watch-request', 'moderate', 'signal', 'stop'])
 
 const safeSend = (socket, message) => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }
-const publicUsers = () => [...clients.values()].map(({ id, name }) => ({ id, name }))
+const publicUsers = () => [...clients.values()].map(({ id, name, role, broadcasting }) => ({ id, name, role, broadcasting }))
 const broadcastUsers = () => {
   const message = { type: 'users', users: publicUsers() }
   for (const { socket } of clients.values()) safeSend(socket, message)
@@ -89,36 +92,32 @@ wss.on('connection', (socket, request) => {
       if (message.type !== 'hello') return safeSend(socket, { type: 'error', message: 'Identifique-se primeiro.' })
       const name = cleanName(authenticated.name)
       if (name.length < 2) return safeSend(socket, { type: 'error', message: 'Use um nome com pelo menos 2 caracteres.' })
+      if (clients.size >= 5) { safeSend(socket, { type: 'room-full', message: 'A sala atingiu o limite de 5 pessoas.' }); return socket.close(1008, 'Sala cheia') }
+      if (bannedNames.has(name.toLocaleLowerCase('pt-BR'))) { safeSend(socket, { type: 'banned' }); return socket.close(1008, 'Banido') }
       if ([...clients.values()].some((client) => client.name.toLocaleLowerCase('pt-BR') === name.toLocaleLowerCase('pt-BR'))) {
         safeSend(socket, { type: 'error', message: 'Este nome de usuário já está online.' }); return socket.close(1008, 'Nome em uso')
       }
-      clients.set(id, { id, name, socket })
+      clients.set(id, { id, name, role: authenticated.role === 'admin' ? 'admin' : 'member', broadcasting: false, socket })
       registered = true
-      safeSend(socket, { type: 'welcome', id })
+      safeSend(socket, { type: 'welcome', id, role: authenticated.role === 'admin' ? 'admin' : 'member' })
       return broadcastUsers()
     }
     const sender = clients.get(id)
+    if (message.type === 'broadcast-start') { sender.broadcasting = true; return broadcastUsers() }
+    if (message.type === 'broadcast-stop') { sender.broadcasting = false; return broadcastUsers() }
     const target = typeof message.to === 'string' ? clients.get(message.to) : null
     if (!target || target.id === id) return safeSend(socket, { type: 'error', message: 'Usuário indisponível.' })
 
-    if (message.type === 'share-request') {
-      const requestId = crypto.randomUUID()
-      pendingRequests.set(requestId, { requesterId: id, transmitterId: target.id, expiresAt: Date.now() + 60_000 })
-      setTimeout(() => {
-        const request = pendingRequests.get(requestId)
-        if (request && request.expiresAt <= Date.now()) {
-          pendingRequests.delete(requestId)
-          safeSend(clients.get(request.requesterId)?.socket, { type: 'share-response', requestId, accepted: false, reason: 'expired', from: request.transmitterId })
-          safeSend(clients.get(request.transmitterId)?.socket, { type: 'request-expired', requestId })
-        }
-      }, 60_100)
-      return safeSend(target.socket, { type: 'share-request', requestId, from: id, fromName: sender.name })
+    if (message.type === 'watch-request') {
+      if (!target.broadcasting) return safeSend(socket, { type: 'error', message: 'Esta transmissão não está mais disponível.' })
+      return safeSend(target.socket, { type: 'watch-request', from: id, fromName: sender.name })
     }
-    if (message.type === 'share-response') {
-      const request = pendingRequests.get(message.requestId)
-      if (!request || request.transmitterId !== id || request.requesterId !== target.id || typeof message.accepted !== 'boolean') return safeSend(socket, { type: 'error', message: 'Solicitação inválida ou expirada.' })
-      pendingRequests.delete(message.requestId)
-      return safeSend(target.socket, { type: 'share-response', requestId: message.requestId, accepted: message.accepted, from: id })
+    if (message.type === 'moderate') {
+      if (sender.role !== 'admin' || !['kick', 'ban'].includes(message.action)) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })
+      if (message.action === 'ban') bannedNames.add(target.name.toLocaleLowerCase('pt-BR'))
+      safeSend(target.socket, { type: message.action === 'ban' ? 'banned' : 'kicked' })
+      target.socket.close(1008, message.action === 'ban' ? 'Banido' : 'Expulso')
+      return
     }
     if (message.type === 'signal') {
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })
@@ -135,9 +134,6 @@ wss.on('connection', (socket, request) => {
   socket.on('close', () => {
     if (!registered) return
     clients.delete(id)
-    for (const [requestId, request] of pendingRequests) {
-      if (request.requesterId === id || request.transmitterId === id) pendingRequests.delete(requestId)
-    }
     for (const { socket: peerSocket } of clients.values()) safeSend(peerSocket, { type: 'peer-left', id })
     broadcastUsers()
   })

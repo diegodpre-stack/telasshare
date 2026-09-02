@@ -69,11 +69,11 @@ No plano gratuito, o serviço pode dormir após 15 minutos sem tráfego e levar 
 
 ### Aplicativo para Windows
 
-O site também oferece um instalador Windows 64-bit em todas as telas. O aplicativo Electron abre o mesmo serviço hospedado no Render, portanto usuários do navegador e do aplicativo entram nas mesmas salas e assistem às mesmas transmissões. Ele inclui seu próprio mecanismo Chromium e não depende de Edge, Chrome ou WebView2 instalados.
+O site oferece em todas as telas uma versão portátil (`EntreTelas-Portable.exe`), que abre sem instalação, e um instalador Windows 64-bit opcional. O aplicativo Electron abre o mesmo serviço hospedado no Render, portanto usuários do navegador e do aplicativo entram nas mesmas salas e assistem às mesmas transmissões. Ele inclui seu próprio mecanismo Chromium e não depende de Edge, Chrome ou WebView2 instalados.
 
-Ao iniciar uma captura no aplicativo, uma segunda confirmação mostra as telas e janelas disponíveis. Nada pode iniciar a captura silenciosamente. No Windows, o áudio oferecido pelo Electron é o áudio do sistema; para compartilhar apenas o som de uma guia, continue usando a versão pelo navegador.
+Ao iniciar uma captura no aplicativo, uma segunda confirmação mostra as telas e janelas disponíveis. Nada pode iniciar a captura silenciosamente. Tela inteira pode incluir todo o áudio do sistema. Ao selecionar uma janela, o aplicativo transmite somente o vídeo, pois o Windows/Electron não fornece áudio isolado por processo de forma segura. Isso evita vazar Discord ou outros programas. Para compartilhar somente o áudio de um site, use a versão web no Chrome/Edge e selecione uma guia.
 
-Cada push na branch `main` executa `.github/workflows/desktop-release.yml`, gera uma versão nova e publica `EntreTelas-Setup.exe` nas Releases do GitHub. O aplicativo verifica essa fonte ao abrir, baixa atualizações em segundo plano e oferece reinicialização imediata quando a nova versão fica pronta. Sem um certificado comercial de assinatura, o Windows pode exibir o aviso de editor desconhecido na primeira instalação.
+Cada push na branch `main` executa `.github/workflows/desktop-release.yml`, gera uma versão nova e publica `EntreTelas-Portable.exe` e `EntreTelas-Setup.exe` nas Releases do GitHub. A versão instalada verifica essa fonte ao abrir, baixa atualizações em segundo plano e oferece reinicialização imediata quando a nova versão fica pronta. A versão portátil precisa ser substituída por um novo download quando houver atualização. Sem um certificado comercial de assinatura, o Windows pode exibir o aviso de editor desconhecido na primeira execução.
 
 Para testar ou gerar o instalador localmente:
 

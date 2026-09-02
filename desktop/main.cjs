@@ -31,7 +31,17 @@ async function chooseDisplaySource(request, callback) {
     })
     if (result.response === cancelId) return callback({})
     const source = sources[result.response]
-    callback({ video: source, ...(request.audioRequested ? { audio: 'loopback' } : {}) })
+    const isEntireScreen = source.id.startsWith('screen:')
+    if (request.audioRequested && !isEntireScreen) {
+      await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Áudio protegido',
+        message: 'Esta janela será compartilhada sem áudio.',
+        detail: 'O Windows não fornece ao aplicativo uma faixa isolada dessa janela. Isso evita transmitir por engano sons do Discord ou de outros programas. Para áudio isolado de um site, abra o EntreTelas no Chrome/Edge e compartilhe somente a guia.',
+        buttons: ['Continuar somente com vídeo'],
+      })
+    }
+    callback({ video: source, ...(request.audioRequested && isEntireScreen ? { audio: 'loopback' } : {}) })
   } catch {
     callback({})
   }
@@ -74,7 +84,7 @@ function createWindow() {
 }
 
 function configureUpdates() {
-  if (!app.isPackaged) return
+  if (!app.isPackaged || process.env.PORTABLE_EXECUTABLE_FILE) return
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
   autoUpdater.on('update-downloaded', async () => {

@@ -13,7 +13,7 @@
     "dev:web": "vite --host 0.0.0.0",
     "build": "vite build",
     "desktop": "electron .",
-    "desktop:dist": "electron-builder --win nsis",
+    "desktop:dist": "electron-builder --win nsis portable",
     "start": "node server/index.js",
     "check": "eslint ."
   },
@@ -58,16 +58,23 @@
         {
           "target": "nsis",
           "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
         }
-      ],
-      "artifactName": "EntreTelas-Setup.${ext}"
+      ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "EntreTelas"
+      "shortcutName": "EntreTelas",
+      "artifactName": "EntreTelas-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "EntreTelas-Portable.${ext}"
     },
     "publish": [
       {

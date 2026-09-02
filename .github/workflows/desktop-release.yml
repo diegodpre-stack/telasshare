@@ -42,4 +42,5 @@ jobs:
           files: |
             release/EntreTelas-Setup.exe
             release/EntreTelas-Setup.exe.blockmap
+            release/EntreTelas-Portable.exe
             release/latest.yml

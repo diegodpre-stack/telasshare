@@ -67,6 +67,21 @@ O arquivo `render.yaml` deixa o projeto pronto para o Render. Coloque esta pasta
 
 No plano gratuito, o serviço pode dormir após 15 minutos sem tráfego e levar cerca de um minuto para acordar. Ele é adequado para testes e uso ocasional, não para uma versão de produção.
 
+### Aplicativo para Windows
+
+O site também oferece um instalador Windows 64-bit em todas as telas. O aplicativo Electron abre o mesmo serviço hospedado no Render, portanto usuários do navegador e do aplicativo entram nas mesmas salas e assistem às mesmas transmissões. Ele inclui seu próprio mecanismo Chromium e não depende de Edge, Chrome ou WebView2 instalados.
+
+Ao iniciar uma captura no aplicativo, uma segunda confirmação mostra as telas e janelas disponíveis. Nada pode iniciar a captura silenciosamente. No Windows, o áudio oferecido pelo Electron é o áudio do sistema; para compartilhar apenas o som de uma guia, continue usando a versão pelo navegador.
+
+Cada push na branch `main` executa `.github/workflows/desktop-release.yml`, gera uma versão nova e publica `EntreTelas-Setup.exe` nas Releases do GitHub. O aplicativo verifica essa fonte ao abrir, baixa atualizações em segundo plano e oferece reinicialização imediata quando a nova versão fica pronta. Sem um certificado comercial de assinatura, o Windows pode exibir o aviso de editor desconhecido na primeira instalação.
+
+Para testar ou gerar o instalador localmente:
+
+```powershell
+npm run desktop
+npm run desktop:dist
+```
+
 ### Salas privadas
 
 O Blueprint gera `SESSION_SECRET` automaticamente. Não existe senha geral para usuários comuns: basta escolher um nome. Depois desse login, o lobby mostra os nomes das salas, mas não mostra participantes nem transmissões. Qualquer usuário pode criar uma sala e escolher sua senha; os amigos clicam nela e informam essa senha para entrar. O login fica salvo no navegador por até 30 dias. O servidor limita tentativas administrativas incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.

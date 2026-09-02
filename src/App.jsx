@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Ban, Cast, CircleStop, DoorOpen, Expand, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Wifi, WifiOff, X } from 'lucide-react'
+import { Ban, Cast, CircleStop, DoorOpen, Expand, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
 const defaultSignalHost = localHost ? `${location.hostname}:8787` : location.host
@@ -14,13 +14,35 @@ const iceServers = () => {
   if (turn.length) servers.push({ urls: turn, username: import.meta.env.VITE_TURN_USERNAME || '', credential: import.meta.env.VITE_TURN_CREDENTIAL || '' })
   return servers
 }
+const audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
+const preferStereoOpus = (sdp) => {
+  const rtpmap = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i)
+  if (!rtpmap) return sdp
+  const payload = rtpmap[1]
+  const fmtp = new RegExp(`a=fmtp:${payload} ([^\\r\\n]*)`)
+  if (fmtp.test(sdp)) return sdp.replace(fmtp, (_line, params) => {
+    const kept = params.split(';').map((part) => part.trim()).filter((part) => part && !/^(stereo|sprop-stereo|maxaveragebitrate|useinbandfec)=/i.test(part))
+    return `a=fmtp:${payload} ${[...kept, 'stereo=1', 'sprop-stereo=1', 'useinbandfec=1', 'maxaveragebitrate=256000'].join(';')}`
+  })
+  return sdp.replace(rtpmap[0], `${rtpmap[0]}\r\na=fmtp:${payload} stereo=1;sprop-stereo=1;useinbandfec=1;maxaveragebitrate=256000`)
+}
 
 function RemoteScreen({ screen, name, size, onStop }) {
   const videoRef = useRef(null)
-  useEffect(() => { if (videoRef.current) videoRef.current.srcObject = screen.stream || null }, [screen.stream])
+  const [muted, setMuted] = useState(false)
+  const [volume, setVolume] = useState(1)
+  const [audioBlocked, setAudioBlocked] = useState(false)
+  const play = useCallback(() => {
+    const video = videoRef.current; if (!video) return
+    video.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(!video.muted))
+  }, [])
+  useEffect(() => { const video = videoRef.current; if (!video) return; video.srcObject = screen.stream || null; if (screen.stream) play() }, [screen.stream, play])
+  useEffect(() => { const video = videoRef.current; if (!video) return; video.muted = muted; video.volume = volume }, [muted, volume, screen.stream])
+  const enableAudio = () => { const video = videoRef.current; if (!video) return; video.muted = false; setMuted(false); play() }
   return <article className={`screen-card size-${size}`}>
-    <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{screen.fps ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}</span></div><div><button title="Tela cheia" onClick={() => videoRef.current?.parentElement?.requestFullscreen?.()}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
-    <div className="remote-frame"><video ref={videoRef} autoPlay playsInline />{!screen.stream && <div className="video-placeholder overlay"><div className="spinner" /><strong>Aguardando a tela</strong></div>}</div>
+    <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{screen.fps ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}</span></div><div><button title="Tela cheia" onClick={() => videoRef.current?.parentElement?.requestFullscreen?.()}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
+    <div className="remote-frame"><video ref={videoRef} autoPlay playsInline />{!screen.stream && <div className="video-placeholder overlay"><div className="spinner" /><strong>Aguardando a tela</strong></div>}{screen.hasAudio && audioBlocked && <button className="audio-unlock" onClick={enableAudio}><Volume2 size={16} />Ativar som</button>}</div>
+    {screen.hasAudio && <div className="screen-audio"><button title={muted ? 'Ativar som' : 'Silenciar'} onClick={() => setMuted((current) => !current)}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0) }} aria-label={`Volume da tela de ${name}`} /><span>{Math.round((muted ? 0 : volume) * 100)}%</span></div>}
   </article>
 }
 
@@ -53,6 +75,8 @@ export default function App() {
   const [quality, setQuality] = useState('medium')
   const [customMbps, setCustomMbps] = useState(8)
   const [screenSize, setScreenSize] = useState('medium')
+  const [shareAudio, setShareAudio] = useState(true)
+  const [audioStatus, setAudioStatus] = useState('idle')
   const socketRef = useRef(null)
   const pcsRef = useRef(new Map())
   const localStreamRef = useRef(null)
@@ -72,11 +96,13 @@ export default function App() {
   const stopSharing = useCallback((notify = true) => {
     for (const [id, entry] of pcsRef.current) if (entry.role === 'transmitter') closeConnection(id, notify)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
+    setAudioStatus('idle')
     send({ type: 'broadcast-stop' }); setViewers({}); setNotice('Sua transmissão foi encerrada. As telas que você assiste continuam abertas.')
   }, [closeConnection, send])
   const closeAll = useCallback(() => {
     for (const id of [...pcsRef.current.keys()]) closeConnection(id, false)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
+    setAudioStatus('idle')
   }, [closeConnection])
 
   const createPeer = useCallback((connectionId, peerId, role) => {
@@ -104,13 +130,16 @@ export default function App() {
       if (!entry) {
         if (message.description?.type !== 'offer') return
         entry = createPeer(message.connectionId, message.from, 'viewer')
-        entry.pc.ontrack = ({ streams }) => { setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, stream: streams[0] } })); startStats(message.connectionId, entry.pc) }
-        setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, waiting: false, stream: null } }))
+        entry.pc.ontrack = ({ streams, track }) => {
+          setRemoteScreens((current) => ({ ...current, [message.connectionId]: { ...current[message.connectionId], peerId: message.from, waiting: false, stream: streams[0], hasAudio: track.kind === 'audio' || Boolean(current[message.connectionId]?.hasAudio) } }))
+          if (track.kind === 'video') startStats(message.connectionId, entry.pc)
+        }
+        setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, waiting: false, stream: null, hasAudio: false } }))
       }
       if (message.description) {
         await entry.pc.setRemoteDescription(message.description)
         for (const candidate of entry.pendingCandidates.splice(0)) await entry.pc.addIceCandidate(candidate)
-        if (message.description.type === 'offer') { const answer = await entry.pc.createAnswer(); await entry.pc.setLocalDescription(answer); send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription }) }
+        if (message.description.type === 'offer') { const answer = await entry.pc.createAnswer(); await entry.pc.setLocalDescription({ type: answer.type, sdp: preferStereoOpus(answer.sdp) }); send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription }) }
       } else if (message.candidate) {
         if (entry.pc.remoteDescription) await entry.pc.addIceCandidate(message.candidate); else entry.pendingCandidates.push(message.candidate)
       }
@@ -186,22 +215,43 @@ export default function App() {
 
   const getCapture = async () => {
     if (localStreamRef.current?.getVideoTracks()[0]?.readyState === 'live') return localStreamRef.current
-    const preset = resolutions[resolution]; const video = { frameRate: { ideal: fps, max: fps }, displaySurface: 'monitor' }
+    const preset = resolutions[resolution]; const video = { frameRate: { ideal: fps, max: fps } }
     if (preset.width) { video.width = { ideal: preset.width }; video.height = { ideal: preset.height } }
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false }); localStreamRef.current = stream
+    let stream
+    if (shareAudio) {
+      try { stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: audioConstraints, systemAudio: 'include' }) }
+      catch (error) {
+        if (error?.name === 'NotAllowedError') throw error
+        stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: true })
+      }
+    } else stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false })
+    localStreamRef.current = stream
+    const audioTrack = stream.getAudioTracks()[0]
+    setAudioStatus(audioTrack ? 'on' : shareAudio ? 'unavailable' : 'off')
+    if (audioTrack) audioTrack.onended = () => setAudioStatus('unavailable')
     stream.getVideoTracks()[0].onended = () => stopSharing(true); return stream
   }
   const startBroadcast = async () => {
-    try { await getCapture(); send({ type: 'broadcast-start' }); setNotice('Sua transmissão está disponível para todos na sala.') }
+    try {
+      const stream = await getCapture(); send({ type: 'broadcast-start' })
+      setNotice(!shareAudio ? 'Sua transmissão está disponível para todos na sala (sem áudio).'
+        : stream.getAudioTracks().length ? 'Sua transmissão está disponível para todos na sala, com o áudio do que você escolheu compartilhar.'
+        : 'Transmissão iniciada, mas sem áudio. Janelas de aplicativo não permitem capturar som: escolha a tela inteira ou uma aba do navegador e marque a opção de compartilhar o áudio.')
+    }
     catch (error) { setNotice(error?.name === 'NotAllowedError' ? 'Você cancelou a escolha da tela.' : 'Não foi possível iniciar a captura.') }
   }
   const shareWith = async (peerId) => {
     try {
       const stream = localStreamRef.current; if (!stream) return
-      const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter'); const track = stream.getVideoTracks()[0]
-      const sender = entry.pc.addTrack(track, stream); const maxBitrate = quality === 'custom' ? Math.round(customMbps * 1_000_000) : bitratePresets[quality]
+      const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter'); const videoTrack = stream.getVideoTracks()[0]
+      const sender = entry.pc.addTrack(videoTrack, stream); const maxBitrate = quality === 'custom' ? Math.round(customMbps * 1_000_000) : bitratePresets[quality]
       try { const parameters = sender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = maxBitrate; parameters.encodings[0].maxFramerate = fps; await sender.setParameters(parameters) } catch { /* best effort */ }
-      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, description: entry.pc.localDescription })
+      const audioTrack = stream.getAudioTracks()[0]
+      if (audioTrack) {
+        const audioSender = entry.pc.addTrack(audioTrack, stream)
+        try { const parameters = audioSender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = 256_000; await audioSender.setParameters(parameters) } catch { /* best effort */ }
+      }
+      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription({ type: offer.type, sdp: preferStereoOpus(offer.sdp) }); send({ type: 'signal', to: peerId, connectionId, description: entry.pc.localDescription })
       setViewers((current) => ({ ...current, [connectionId]: { peerId } })); setNotice('Novo espectador conectado à sua transmissão.')
     } catch { setNotice('Não foi possível conectar o novo espectador.') }
   }
@@ -218,11 +268,11 @@ export default function App() {
   if (!joined) return <main className="shell lobby-shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>EntreTelas</strong><span>Olá, {name}{siteRole === 'superadmin' ? ' · SUPER ADM' : siteRole === 'admin' ? ' · ADM' : ''}</span></div></div><button className="leave-room" onClick={logoutSite}><LogOut size={15} />Sair do site</button></header><section className="lobby-heading"><div><p className="eyebrow">Lobby privado</p><h1>Escolha uma sala</h1><p>Somente o nome da sala aparece aqui. Usuários e transmissões continuam ocultos até você entrar.</p></div><button className="create-room-button" onClick={() => { setCreatingRoom(true); setAccessError('') }}><Plus size={17} />Criar sala</button></section>{accessError && !selectedRoom && !creatingRoom && <p className="lobby-error">{accessError}</p>}<section className="rooms-grid">{rooms.length ? rooms.map((room) => <button className="room-card" key={room.id} onClick={() => { setSelectedRoom(room); setRoomPassword(''); setAccessError('') }}><div className="room-icon"><DoorOpen size={22} /></div><div><strong>{room.name}</strong><span>{siteRole === 'superadmin' ? 'Acesso de SUPER ADM' : 'Clique para informar a senha'}</span></div><KeyRound size={17} /></button>) : <div className="rooms-empty"><DoorOpen size={35} /><strong>Nenhuma sala criada</strong><span>Crie a primeira sala e compartilhe a senha somente com quem você quiser.</span></div>}</section>{selectedRoom && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={(event) => { event.preventDefault(); joinRoom(selectedRoom) }}><button type="button" className="modal-close" onClick={() => setSelectedRoom(null)}><X size={17} /></button><div className="request-icon"><KeyRound size={25} /></div><p className="eyebrow">Sala privada</p><h3>{selectedRoom.name}</h3>{siteRole === 'superadmin' ? <p>Você pode entrar usando sua permissão de SUPER ADM.</p> : <><label htmlFor="room-password">Senha da sala</label><input id="room-password" type="password" value={roomPassword} onChange={(event) => setRoomPassword(event.target.value)} autoFocus /></>} {accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Entrando…' : siteRole === 'superadmin' ? 'Entrar como SUPER ADM' : 'Entrar na sala'}</button></form></div>}{creatingRoom && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={createRoom}><button type="button" className="modal-close" onClick={() => setCreatingRoom(false)}><X size={17} /></button><div className="request-icon"><Plus size={25} /></div><p className="eyebrow">Nova sala</p><h3>Criar sala privada</h3><label htmlFor="new-room-name">Nome da sala</label><input id="new-room-name" value={newRoomName} onChange={(event) => setNewRoomName(event.target.value)} maxLength={40} autoFocus /><label htmlFor="new-room-password">Senha da sala</label><input id="new-room-password" type="password" value={newRoomPassword} onChange={(event) => setNewRoomPassword(event.target.value)} minLength={4} maxLength={128} />{accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Criando…' : 'Criar e entrar'}</button></form></div>}</main>
 
   return <main className="shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>EntreTelas</strong><span>Sala · {roomName}</span></div></div><div className="header-actions"><div className={`connection ${connection}`}><span className="pulse" />{connection === 'online' ? <Wifi size={15} /> : <WifiOff size={15} />}{connection === 'online' ? 'Conectado' : connection === 'connecting' ? 'Conectando' : 'Offline'}</div><button className="leave-room" onClick={leaveRoom}><LogOut size={15} />Sair da sala</button></div></header>
-    {localStreamRef.current && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {resolutions[resolution].label} · preferência {fps} FPS</span></div><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div>}
+    {localStreamRef.current && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {resolutions[resolution].label} · preferência {fps} FPS · {audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section><div className="workspace multi-workspace">
       <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length + 1}</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Compartilhe o nome e a senha desta sala com seus amigos.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions"><button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>{isAdmin && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>
       <section className="panel stage multi-stage"><div className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>
-      <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><label>FPS preferido</label><div className="segmented three">{[30, 60, 120].map((value) => <button type="button" className={fps === value ? 'selected' : ''} key={value} onClick={() => setFps(value)}>{value}</button>)}</div><p className="hint">120 FPS é uma preferência. O navegador, tela e GPU determinam o valor efetivo.</p><label>Bitrate por espectador</label><div className="quality-list">{Object.keys(bitrateLabels).map((key) => <button type="button" className={quality === key ? 'selected' : ''} key={key} onClick={() => setQuality(key)}><span>{bitrateLabels[key]}</span><small>{key === 'low' ? '2,5 Mbps' : key === 'medium' ? '8 Mbps' : key === 'high' ? '14 Mbps' : 'defina abaixo'}</small></button>)}</div>{quality === 'custom' && <label className="custom">Mbps<input type="number" min="0.5" max="100" step="0.5" value={customMbps} onChange={(event) => setCustomMbps(Math.min(100, Math.max(.5, Number(event.target.value))))} /></label>}</fieldset>{!localStreamRef.current && <button className="start-broadcast" onClick={startBroadcast}><Radio size={17} />Iniciar transmissão</button>}<div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
+      <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><label>FPS preferido</label><div className="segmented three">{[30, 60, 120].map((value) => <button type="button" className={fps === value ? 'selected' : ''} key={value} onClick={() => setFps(value)}>{value}</button>)}</div><p className="hint">120 FPS é uma preferência. O navegador, tela e GPU determinam o valor efetivo.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">O som segue exatamente o que você escolher na janela do navegador: tela inteira envia o áudio do sistema, uma aba envia só o áudio dela. Janelas de aplicativo não têm captura de som.</p><label>Bitrate por espectador</label><div className="quality-list">{Object.keys(bitrateLabels).map((key) => <button type="button" className={quality === key ? 'selected' : ''} key={key} onClick={() => setQuality(key)}><span>{bitrateLabels[key]}</span><small>{key === 'low' ? '2,5 Mbps' : key === 'medium' ? '8 Mbps' : key === 'high' ? '14 Mbps' : 'defina abaixo'}</small></button>)}</div>{quality === 'custom' && <label className="custom">Mbps<input type="number" min="0.5" max="100" step="0.5" value={customMbps} onChange={(event) => setCustomMbps(Math.min(100, Math.max(.5, Number(event.target.value))))} /></label>}</fieldset>{!localStreamRef.current && <button className="start-broadcast" onClick={startBroadcast}><Radio size={17} />Iniciar transmissão</button>}<div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
     </div>
   </main>
 }

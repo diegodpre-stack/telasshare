@@ -16,6 +16,7 @@ app.use(express.json({ limit: '16kb' }))
 app.get('/health', (_req, res) => res.json({ ok: true }))
 
 const sessionSecret = process.env.SESSION_SECRET || (!process.env.RENDER ? 'local-development-session-secret' : '')
+const sitePassword = process.env.ROOM_PASSWORD || (!process.env.RENDER ? 'entretelas' : '')
 const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_${number}`]).filter(Boolean)
 const loginAttempts = new Map()
 const rooms = new Map()
@@ -41,6 +42,11 @@ const rateLimitLogin = (req, res) => {
   if (recent.length >= 10) { res.status(429).json({ error: 'Muitas tentativas. Aguarde dez minutos.' }); return null }
   return { ip, now, recent }
 }
+const readBearerSession = (req, kind = 'site') => {
+  const header = req.get('authorization') || ''
+  const session = verifySession(header.startsWith('Bearer ') ? header.slice(7) : '')
+  return session?.kind === kind ? session : null
+}
 const signSession = (payload) => {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
   const signature = crypto.createHmac('sha256', sessionSecret).update(body).digest('base64url')
@@ -57,39 +63,53 @@ const verifySession = (token) => {
   try { const payload = JSON.parse(Buffer.from(body, 'base64url')); return payload.exp > Date.now() ? payload : null } catch { return null }
 }
 
-app.post('/api/rooms', (req, res) => {
-  if (!sessionSecret) return res.status(503).json({ error: 'O serviço ainda não foi configurado.' })
+app.post('/api/login', (req, res) => {
+  if (!sitePassword || !sessionSecret) return res.status(503).json({ error: 'O acesso ao site ainda não foi configurado.' })
   const attempt = rateLimitLogin(req, res); if (!attempt) return
   const name = cleanUserName(req.body?.name)
-  const roomName = normalizeRoomName(req.body?.roomName)
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
-  if (name.length < 2 || roomName.length < 2 || password.length < 4 || password.length > 128) {
-    attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
-    return res.status(400).json({ error: 'Informe usuário, nome da sala e uma senha com pelo menos 4 caracteres.' })
-  }
-  const key = roomKey(roomName)
-  if (rooms.has(key)) return res.status(409).json({ error: 'Não foi possível criar essa sala. Escolha outro nome.' })
-  const room = { id: crypto.randomUUID(), name: roomName, password: hashPassword(password), bannedNames: new Set(), createdAt: attempt.now }
-  rooms.set(key, room); loginAttempts.delete(attempt.ip)
   const role = adminPasswords.some((adminPassword) => secretMatches(password, adminPassword)) ? 'admin' : 'member'
-  res.status(201).json({ session: signSession({ sub: crypto.randomUUID(), name, role, roomId: room.id, roomKey: key, exp: attempt.now + ROOM_SESSION_MS }), role, roomName })
-})
-
-app.post('/api/rooms/join', (req, res) => {
-  if (!sessionSecret) return res.status(503).json({ error: 'O serviço ainda não foi configurado.' })
-  const attempt = rateLimitLogin(req, res); if (!attempt) return
-  const name = cleanUserName(req.body?.name)
-  const key = roomKey(normalizeRoomName(req.body?.roomName))
-  const password = typeof req.body?.password === 'string' ? req.body.password : ''
-  const room = rooms.get(key)
-  const role = adminPasswords.some((adminPassword) => secretMatches(password, adminPassword)) ? 'admin' : 'member'
-  const valid = room && (role === 'admin' || passwordMatches(password, room.password))
-  if (name.length < 2 || !valid) {
+  if (name.length < 2 || (role !== 'admin' && !secretMatches(password, sitePassword))) {
     attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
-    return res.status(401).json({ error: 'Sala, usuário ou senha incorretos.' })
+    return res.status(401).json({ error: 'Usuário ou senha incorretos.' })
   }
   loginAttempts.delete(attempt.ip)
-  res.json({ session: signSession({ sub: crypto.randomUUID(), name, role, roomId: room.id, roomKey: key, exp: attempt.now + ROOM_SESSION_MS }), role, roomName: room.name })
+  res.json({ session: signSession({ kind: 'site', sub: crypto.randomUUID(), name, role, exp: attempt.now + ROOM_SESSION_MS }), role })
+})
+
+app.get('/api/rooms', (req, res) => {
+  const authenticated = readBearerSession(req)
+  if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
+  res.json({ rooms: [...rooms.values()].map(({ id, name }) => ({ id, name })), role: authenticated.role })
+})
+
+app.post('/api/rooms', (req, res) => {
+  const authenticated = readBearerSession(req)
+  if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
+  const roomName = normalizeRoomName(req.body?.roomName)
+  const password = typeof req.body?.password === 'string' ? req.body.password : ''
+  if (roomName.length < 2 || password.length < 4 || password.length > 128) return res.status(400).json({ error: 'Informe um nome e uma senha com pelo menos 4 caracteres.' })
+  const key = roomKey(roomName)
+  if (rooms.has(key)) return res.status(409).json({ error: 'Não foi possível criar essa sala. Escolha outro nome.' })
+  const room = { id: crypto.randomUUID(), name: roomName, password: hashPassword(password), bannedNames: new Set(), createdAt: Date.now() }
+  rooms.set(key, room)
+  res.status(201).json({ room: { id: room.id, name: room.name } })
+})
+
+app.post('/api/rooms/:roomId/join', (req, res) => {
+  const authenticated = readBearerSession(req)
+  if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
+  const attempt = rateLimitLogin(req, res); if (!attempt) return
+  const password = typeof req.body?.password === 'string' ? req.body.password : ''
+  const entry = [...rooms.entries()].find(([, candidate]) => candidate.id === req.params.roomId)
+  const room = entry?.[1]
+  const valid = room && (authenticated.role === 'admin' || passwordMatches(password, room.password))
+  if (!valid) {
+    attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
+    return res.status(401).json({ error: 'Senha da sala incorreta.' })
+  }
+  loginAttempts.delete(attempt.ip)
+  res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: authenticated.role, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: authenticated.role, roomName: room.name })
 })
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -123,7 +143,7 @@ wss.on('connection', (socket, request) => {
   const sessionToken = new URL(request.url, 'http://localhost').searchParams.get('session')
   const authenticated = verifySession(sessionToken)
   const room = authenticated ? rooms.get(authenticated.roomKey) : null
-  if (!authenticated || !room || room.id !== authenticated.roomId) { socket.close(1008, 'Entrada na sala necessária'); return }
+  if (!authenticated || authenticated.kind !== 'room' || !room || room.id !== authenticated.roomId) { socket.close(1008, 'Entrada na sala necessária'); return }
   const id = crypto.randomUUID()
   let registered = false
   socket.on('message', (raw) => {

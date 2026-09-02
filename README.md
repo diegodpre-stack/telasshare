@@ -4,7 +4,7 @@ Primeira versão funcional de compartilhamento privado de tela. O navegador do t
 
 O aplicativo aceita várias transmissões simultâneas: uma tela pode ser enviada para vários amigos, cada pessoa pode transmitir enquanto assiste outras telas, e o painel oferece tamanhos Pequeno, Médio e Grande, além de tela cheia por transmissão.
 
-Qualquer pessoa pode criar uma sala com nome e senha. Quem não entrou nela não recebe nomes, presença, transmissões ou sinalização WebRTC. Dentro da sala, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores. Quatro senhas administrativas opcionais dão acesso a controles de expulsar e banir usuários pelo nome; os banimentos ficam em memória até o próximo reinício do serviço.
+Depois do login geral do site, o lobby mostra apenas os nomes das salas disponíveis. Qualquer pessoa autenticada pode criar uma sala com nome e senha; participantes, presença, transmissões e sinalização WebRTC só ficam disponíveis após a senha da sala ser validada. Dentro dela, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores. Quatro senhas administrativas opcionais dão acesso a controles de expulsar e banir usuários pelo nome; os banimentos ficam em memória até o próximo reinício do serviço.
 
 ## Requisitos
 
@@ -23,7 +23,7 @@ npm install
 npm run dev
 ```
 
-Abra `http://localhost:5173` em duas janelas ou perfis do navegador. Crie uma sala na primeira e entre usando o mesmo nome de sala e senha na segunda.
+Abra `http://localhost:5173` em duas janelas ou perfis do navegador. Entre usando a senha geral configurada em `ROOM_PASSWORD`, crie uma sala na primeira janela e clique nela para entrar pela segunda.
 
 ## Dois PCs na mesma rede (recomendado: HTTPS)
 
@@ -65,7 +65,7 @@ No plano gratuito, o serviço pode dormir após 15 minutos sem tráfego e levar 
 
 ### Salas privadas
 
-O Blueprint gera `SESSION_SECRET` automaticamente. No site, qualquer usuário pode criar uma sala e escolher seu nome e senha. Os amigos precisam informar exatamente esses dois dados para entrar. A sessão da sala fica salva no navegador por até 30 dias, desde que a sala continue existindo. O servidor limita tentativas incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.
+Defina `ROOM_PASSWORD` no Render com a senha geral compartilhada — atualmente `REMOVIDA_DO_HISTORICO` no seu serviço. O Blueprint gera `SESSION_SECRET` automaticamente. Depois desse login, o lobby mostra os nomes das salas, mas não mostra participantes nem transmissões. Qualquer usuário autenticado pode criar uma sala e escolher sua senha; os amigos clicam nela e informam essa senha para entrar. O login geral fica salvo no navegador por até 30 dias. O servidor limita tentativas incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.
 
 As salas ficam somente na memória nesta versão. Se o Render reiniciar ou adormecer o serviço gratuito, elas desaparecem e precisam ser criadas novamente; a interface descartará a sessão antiga na próxima tentativa. As senhas são armazenadas em memória com `scrypt`, salt individual e nunca são enviadas para outros participantes.
 

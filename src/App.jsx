@@ -31,7 +31,7 @@ export default function App() {
   const [entryMode, setEntryMode] = useState('join')
   const [accessError, setAccessError] = useState('')
   const [joining, setJoining] = useState(false)
-  const [accessSession, setAccessSession] = useState(() => localStorage.getItem('screen-share-session') || '')
+  const [accessSession, setAccessSession] = useState(() => localStorage.getItem('screen-share-room') ? (localStorage.getItem('screen-share-session') || '') : '')
   const [joined, setJoined] = useState(false)
   const [connection, setConnection] = useState('offline')
   const [selfId, setSelfId] = useState('')

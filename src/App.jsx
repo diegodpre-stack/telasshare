@@ -215,7 +215,7 @@ export default function App() {
 
   const getCapture = async () => {
     if (localStreamRef.current?.getVideoTracks()[0]?.readyState === 'live') return localStreamRef.current
-    const preset = resolutions[resolution]; const video = { frameRate: { ideal: fps, max: fps } }
+    const preset = resolutions[resolution]; const video = { frameRate: { ideal: fps, max: fps }, displaySurface: 'monitor' }
     if (preset.width) { video.width = { ideal: preset.width }; video.height = { ideal: preset.height } }
     let stream
     const picker = { selfBrowserSurface: 'exclude', surfaceSwitching: 'include' }

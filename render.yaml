@@ -6,7 +6,8 @@ services:
     buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /health
-    autoDeploy: true
+    # Commits não reiniciam salas e transmissões em uso. Publique manualmente no Render quando estiver pronto.
+    autoDeploy: false
     envVars:
       - key: NODE_VERSION
         value: 22

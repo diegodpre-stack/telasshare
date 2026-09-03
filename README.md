@@ -61,6 +61,8 @@ Libere as portas TCP `5173` e `8787` no firewall do PC servidor. Nos dois PCs, a
 
 ## Pela internet
 
+O deploy automático do Render fica desativado em `render.yaml`. Assim, commits podem ser enviados ao GitHub sem reiniciar o servidor e interromper salas em uso. Quando uma versão estiver pronta, use **Manual Deploy → Deploy latest commit** no painel do Render. O deploy manual ainda reinicia o servidor, então faça isso quando ninguém estiver transmitindo.
+
 ### Opção simples: Render
 
 O arquivo `render.yaml` deixa o projeto pronto para o Render. Coloque esta pasta em um repositório GitHub e, no painel do Render, escolha **New > Blueprint**, conecte o repositório e confirme a criação do serviço. O Render executará a instalação, o build e `npm start`, fornecendo um endereço `https://...onrender.com`. O frontend usa automaticamente `wss://` no mesmo endereço.

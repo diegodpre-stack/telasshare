@@ -305,7 +305,8 @@ wss.on('connection', (socket, request) => {
     }
     if (message.type === 'stop') {
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })
-      return safeSend(target.socket, { type: 'stop', from: id, connectionId: message.connectionId })
+      const reason = ['ice-timeout', 'signaling-timeout'].includes(message.reason) ? message.reason : undefined
+      return safeSend(target.socket, { type: 'stop', from: id, connectionId: message.connectionId, reason })
     }
   })
   socket.on('close', () => {

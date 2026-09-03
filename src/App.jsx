@@ -127,6 +127,7 @@ function RemoteScreen({ screen, name, size, onStop }) {
   const goFullscreen = () => { const frame = videoRef.current?.parentElement; return frame?.requestFullscreen?.() || videoRef.current?.webkitEnterFullscreen?.() }
   const connectionDetails = [screen.route === 'turn' ? 'TURN' : screen.route === 'p2p' ? 'P2P' : '', screen.protocol, Number.isFinite(screen.rttMs) ? `${screen.rttMs} ms` : '', Number.isFinite(screen.receivedMbps) ? `${screen.receivedMbps} Mbps` : '', Number.isFinite(screen.packetLoss) ? `${screen.packetLoss}% perda` : ''].filter(Boolean).join(' · ')
   return <article className={`screen-card size-${size}`}>
+    {screen.error && <p role="alert" className="hint">{screen.error}</p>}
     <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{Number.isFinite(screen.fps) ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}{connectionDetails ? ` · ${connectionDetails}` : ''}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
     <div className="remote-frame" onDoubleClick={goFullscreen}><video ref={videoRef} autoPlay playsInline />{!screen.stream && <div className="video-placeholder overlay"><div className="spinner" /><strong>Aguardando a tela</strong></div>}{screen.hasAudio && audioBlocked && <button className="audio-unlock" onClick={enableAudio}><Volume2 size={16} />Ativar som</button>}</div>
     {screen.hasAudio && <div className="screen-audio"><button title={muted ? 'Ativar som' : 'Silenciar'} onClick={() => setMuted((current) => !current)}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0) }} aria-label={`Volume da tela de ${name}`} /><span>{Math.round((muted ? 0 : volume) * 100)}%</span></div>}
@@ -196,6 +197,8 @@ export default function App() {
   const [showPeople, setShowPeople] = useState(true)
   const socketRef = useRef(null)
   const pcsRef = useRef(new Map())
+  const earlyCandidatesRef = useRef(new Map())
+  const signalQueueRef = useRef(Promise.resolve())
   const iceServersRef = useRef(staticIceServers())
   const localStreamRef = useRef(null)
   const statsRef = useRef(new Map())
@@ -204,7 +207,7 @@ export default function App() {
 
   const closeConnection = useCallback((connectionId, notify = false) => {
     const entry = pcsRef.current.get(connectionId)
-    if (!entry) return
+    if (!entry) { setRemoteScreens((current) => { const next = { ...current }; delete next[connectionId]; return next }); return }
     if (notify) send({ type: 'stop', to: entry.peerId, connectionId })
     clearInterval(statsRef.current.get(connectionId)); statsRef.current.delete(connectionId); clearTimeout(entry.disconnectTimer); clearTimeout(entry.fallbackTimer)
     entry.pc.close(); pcsRef.current.delete(connectionId)
@@ -221,6 +224,7 @@ export default function App() {
     send({ type: 'broadcast-stop' }); setViewers({}); setNotice('Sua transmissão foi encerrada. As telas que você assiste continuam abertas.')
   }, [closeConnection, send])
   const closeAll = useCallback(() => {
+    earlyCandidatesRef.current.clear()
     for (const id of [...pcsRef.current.keys()]) closeConnection(id, false)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
     setAudioStatus('idle')
@@ -229,7 +233,13 @@ export default function App() {
   const createPeer = useCallback((connectionId, peerId, role, mode = 'auto') => {
     const directServers = iceServersRef.current.map((server) => ({ ...server, urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url) => /^stuns?:/.test(url)) })).filter((server) => server.urls.length)
     const pc = new RTCPeerConnection({ iceServers: mode === 'turn' ? iceServersRef.current : directServers, iceTransportPolicy: mode === 'turn' ? 'relay' : 'all' })
-    const entry = { pc, peerId, role, mode, pendingCandidates: [], disconnectTimer: null, restarting: false }; pcsRef.current.set(connectionId, entry)
+    const entry = { pc, peerId, role, mode, pendingCandidates: earlyCandidatesRef.current.get(connectionId) || [], disconnectTimer: null, restarting: false }; earlyCandidatesRef.current.delete(connectionId); pcsRef.current.set(connectionId, entry)
+    const failConnection = () => {
+      const reason = pc.remoteDescription ? 'ice-timeout' : 'signaling-timeout'
+      send({ type: 'stop', to: peerId, connectionId, reason })
+      closeConnection(connectionId, false)
+      setNotice('A conexão expirou. O espectador recebeu o diagnóstico; a sua captura continua ativa.')
+    }
     entry.restart = async () => {
       if (entry.restarting || pc.signalingState !== 'stable' || pc.connectionState === 'closed') return
       entry.restarting = true
@@ -256,13 +266,12 @@ export default function App() {
         pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'relay' })
         entry.restart()
         entry.fallbackTimer = setTimeout(() => {
-          if (!['connected', 'completed'].includes(pc.iceConnectionState) && pc.connectionState !== 'closed') closeConnection(connectionId, true)
-        }, 15000)
+          if (!['connected', 'completed'].includes(pc.iceConnectionState) && pc.connectionState !== 'closed') failConnection()
+        }, 30000)
       } else {
-        closeConnection(connectionId, true)
-        setNotice('A conexão escolhida não foi possível. Peça ao espectador para tentar outro modo.')
+        failConnection()
       }
-    }, 12000)
+    }, 30000)
     return entry
   }, [closeConnection, send])
 
@@ -339,7 +348,14 @@ export default function App() {
     try {
       let entry = pcsRef.current.get(message.connectionId)
       if (!entry) {
-        if (message.description?.type !== 'offer') return
+        if (message.description?.type !== 'offer') {
+          if (message.candidate && earlyCandidatesRef.current.size < 32) {
+            const pending = earlyCandidatesRef.current.get(message.connectionId) || []
+            if (pending.length < 64) pending.push(message.candidate)
+            earlyCandidatesRef.current.set(message.connectionId, pending)
+          }
+          return
+        }
         entry = createPeer(message.connectionId, message.from, 'viewer', message.mode || 'auto')
         entry.pc.ontrack = ({ streams, track }) => {
           setRemoteScreens((current) => {
@@ -396,9 +412,13 @@ export default function App() {
           setUsers(message.users)
         }
         else if (message.type === 'watch-request') { if (localStreamRef.current) playChime('viewer'); shareWith(message.from, message.mode) }
-        else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); handleSignal(message) }
+        else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); signalQueueRef.current = signalQueueRef.current.then(() => handleSignal(message)).catch(() => {}) }
         else if (message.type === 'restart-request') pcsRef.current.get(message.connectionId)?.restart?.()
-        else if (message.type === 'stop') { closeConnection(message.connectionId, false); setNotice('Visualização encerrada. Se não conectou, tente outro modo de conexão.') }
+        else if (message.type === 'stop') {
+          closeConnection(message.connectionId, false)
+          if (message.reason) setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, error: message.reason === 'ice-timeout' ? 'A negociação terminou, mas a conexão de rede não foi estabelecida em 30 segundos. Feche esta janela e tente outro modo.' : 'A negociação não recebeu resposta a tempo. Feche esta janela, atualizem ambos o app e tentem novamente.' } }))
+          setNotice('Visualização encerrada. Se não conectou, consulte o diagnóstico na janela.')
+        }
         else if (message.type === 'peer-left') { for (const [id, entry] of pcsRef.current) if (entry.peerId === message.id) closeConnection(id, false); setRemoteScreens((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value.peerId !== message.id))) }
         else if (message.type === 'kicked' || message.type === 'banned') { setAccessSession(''); setJoined(false); setNotice(message.type === 'banned' ? 'Você foi banido da sala.' : 'Você foi removido da sala.') }
         else if (message.type === 'error') setNotice(message.message)

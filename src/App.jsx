@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MediaDiagnostics from './MediaDiagnostics.jsx'
-import { selectIceServers } from './icePolicy.js'
+import { buildIceConfiguration } from './icePolicy.js'
 import { applySenderSettings } from './senderSettings.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
@@ -283,8 +283,7 @@ export default function App() {
   }, [broadcasting, viewers, stopSharing])
 
   const createPeer = useCallback((connectionId, peerId, role, mode = 'auto') => {
-    // Pre-gathering shortens the direct stage, which is what keeps traffic off the metered relay.
-    const pc = new RTCPeerConnection({ iceServers: selectIceServers(iceServersRef.current, mode === 'turn' ? 'udp' : 'direct'), iceTransportPolicy: mode === 'turn' ? 'relay' : 'all', iceCandidatePoolSize: 4 })
+    const pc = new RTCPeerConnection(buildIceConfiguration(iceServersRef.current, mode === 'turn' ? 'udp' : 'direct', mode === 'turn'))
     const entry = { pc, peerId, role, mode, pendingCandidates: earlyCandidatesRef.current.get(connectionId) || [], disconnectTimer: null, restarting: false, settled: false }; earlyCandidatesRef.current.delete(connectionId); pcsRef.current.set(connectionId, entry)
     entry.iceDiagnostics = { gathered: 0, received: entry.pendingCandidates.length, applied: 0, rejected: 0, errors: [] }
     entry.turnTransport = mode === 'turn' ? 'udp' : 'direct'
@@ -335,9 +334,16 @@ export default function App() {
       // restart to recover it instead of pinning the viewer to a relay for the rest of the session.
       if (entry.settled && pc.iceConnectionState !== 'failed') { entry.fallbackTimer = setTimeout(advanceFallback, 15_000); return }
       if (mode !== 'p2p' && entry.turnTransport !== 'all' && iceServersRef.current.some((server) => JSON.stringify(server.urls).includes('turn'))) {
+        const nextStage = entry.turnTransport === 'direct' ? 'udp' : 'all'
+        try {
+          pc.setConfiguration(buildIceConfiguration(iceServersRef.current, nextStage, mode !== 'auto', pc.getConfiguration()))
+        } catch {
+          failConnection()
+          setNotice('Não foi possível configurar a conexão auxiliar. A visualização foi encerrada; sua captura continua ativa.')
+          return
+        }
         entry.mode = 'turn'; entry.autoFallback = mode === 'auto'; entry.restarting = false
-        entry.turnTransport = entry.turnTransport === 'direct' ? 'udp' : 'all'
-        pc.setConfiguration({ iceServers: selectIceServers(iceServersRef.current, entry.turnTransport), iceTransportPolicy: entry.autoFallback ? 'all' : 'relay' })
+        entry.turnTransport = nextStage
         entry.restart()
         // Relay over UDP needs room to complete; rushing this stage is what lets TCP win the race.
         entry.fallbackTimer = setTimeout(advanceFallback, 30_000)
@@ -439,7 +445,7 @@ export default function App() {
         if (message.description.type === 'offer' && message.mode === 'turn') {
           entry.mode = 'turn'; entry.autoFallback = message.allowDirect === true
           entry.turnTransport = message.turnTransport === 'udp' ? 'udp' : 'all'
-          entry.pc.setConfiguration({ iceServers: selectIceServers(iceServersRef.current, entry.turnTransport), iceTransportPolicy: entry.autoFallback ? 'all' : 'relay' })
+          entry.pc.setConfiguration(buildIceConfiguration(iceServersRef.current, entry.turnTransport, !entry.autoFallback, entry.pc.getConfiguration()))
         }
         await entry.pc.setRemoteDescription(message.description)
         if (message.description.type === 'answer') { entry.restarting = false; await entry.configureSender?.() }

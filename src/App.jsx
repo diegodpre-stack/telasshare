@@ -15,6 +15,48 @@ const staticIceServers = () => {
   return servers
 }
 const audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
+async function attachDesktopWindowAudio(stream, onError) {
+  const bridge = window.electronAPI
+  if (!bridge?.isWindowAudioActive || !(await bridge.isWindowAudioActive())) return null
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext
+  if (!AudioContextClass) return null
+  const context = new AudioContextClass({ sampleRate: 48000 })
+  const destination = context.createMediaStreamDestination()
+  const processor = context.createScriptProcessor(4096, 0, 2)
+  const queue = []
+  let current = null
+  let offset = 0
+  let closed = false
+  const unsubscribeData = bridge.onWindowAudioData((value) => {
+    if (closed) return
+    const bytes = value?.data ? Uint8Array.from(value.data) : new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength)
+    const copy = bytes.slice()
+    queue.push(new Int16Array(copy.buffer, copy.byteOffset, Math.floor(copy.byteLength / 2)))
+    if (queue.length > 40) queue.splice(0, queue.length - 40)
+  })
+  const cleanup = () => {
+    if (closed) return
+    closed = true
+    unsubscribeData?.(); unsubscribeError?.(); processor.disconnect(); context.close().catch(() => {}); bridge.stopWindowAudio?.()
+  }
+  const unsubscribeError = bridge.onWindowAudioError(() => { onError?.(); cleanup() })
+  processor.onaudioprocess = (event) => {
+    const left = event.outputBuffer.getChannelData(0)
+    const right = event.outputBuffer.getChannelData(1)
+    for (let frame = 0; frame < left.length; frame += 1) {
+      while (!current || offset + 1 >= current.length) { current = queue.shift() || null; offset = 0; if (!current) break }
+      if (!current) { left[frame] = 0; right[frame] = 0; continue }
+      left[frame] = current[offset++] / 32768
+      right[frame] = current[offset++] / 32768
+    }
+  }
+  processor.connect(destination)
+  await context.resume()
+  const track = destination.stream.getAudioTracks()[0]
+  track.addEventListener('ended', cleanup, { once: true })
+  stream.addTrack(track)
+  return track
+}
 const FRIEND_SITE_URL = 'https://osrsiron.com'
 const PORTABLE_DOWNLOAD_URL = 'https://github.com/diegodpre-stack/telasshare/releases/latest/download/EntreTelas-Portable.exe'
 const INSTALLER_DOWNLOAD_URL = 'https://github.com/diegodpre-stack/telasshare/releases/latest/download/EntreTelas-Setup.exe'
@@ -115,6 +157,7 @@ export default function App() {
   const stopSharing = useCallback((notify = true) => {
     for (const [id, entry] of pcsRef.current) if (entry.role === 'transmitter') closeConnection(id, notify)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
+    window.electronAPI?.stopWindowAudio?.()
     setShowSelfPreview(false)
     setAudioStatus('idle')
     send({ type: 'broadcast-stop' }); setViewers({}); setNotice('Sua transmissão foi encerrada. As telas que você assiste continuam abertas.')
@@ -287,6 +330,7 @@ export default function App() {
         stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: true })
       }
     } else stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: false })
+    if (shareAudio && !stream.getAudioTracks().length) await attachDesktopWindowAudio(stream, () => setAudioStatus('unavailable'))
     localStreamRef.current = stream
     const audioTrack = stream.getAudioTracks()[0]
     setAudioStatus(audioTrack ? 'on' : shareAudio ? 'unavailable' : 'off')

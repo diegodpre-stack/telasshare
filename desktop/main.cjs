@@ -1,10 +1,44 @@
-const { app, BrowserWindow, desktopCapturer, dialog, session, shell } = require('electron')
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell } = require('electron')
 const { autoUpdater } = require('electron-updater')
+const { spawn } = require('node:child_process')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const APP_URL = 'https://telasshare.onrender.com'
 const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow
+let processAudioCapture = null
+
+const audioHelperPath = () => app.isPackaged
+  ? path.join(process.resourcesPath, 'native', 'process-audio-capture.exe')
+  : path.join(__dirname, '..', 'native', 'bin', 'process-audio-capture.exe')
+const processAudioAvailable = () => process.platform === 'win32' && fs.existsSync(audioHelperPath())
+
+function stopProcessAudioCapture() {
+  if (!processAudioCapture) return
+  processAudioCapture.kill()
+  processAudioCapture = null
+}
+
+function startProcessAudioCapture(source) {
+  stopProcessAudioCapture()
+  const match = /^window:([^:]+):/.exec(source.id)
+  if (!match || !processAudioAvailable()) return false
+  const capture = spawn(audioHelperPath(), [match[1]], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  processAudioCapture = capture
+  capture.stdout.on('data', (chunk) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window-audio-data', chunk)
+  })
+  capture.on('error', () => {
+    if (processAudioCapture === capture) processAudioCapture = null
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window-audio-error')
+  })
+  capture.on('exit', (code) => {
+    if (processAudioCapture === capture) processAudioCapture = null
+    if (code && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window-audio-error')
+  })
+  return true
+}
 
 const isTrustedUrl = (value) => {
   try { return new URL(value).origin === APP_ORIGIN } catch { return false }
@@ -44,7 +78,7 @@ function showSourcePicker(sources, audioRequested) {
     const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>
       :root{font-family:Segoe UI,Arial,sans-serif;color:#e9f3fb;background:#07111f}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#0d3039,transparent 35%),#07111f;min-height:100vh}.top{position:sticky;top:0;z-index:3;display:flex;align-items:center;justify-content:space-between;padding:22px 26px 17px;background:#07111ff2;border-bottom:1px solid #1f3548;backdrop-filter:blur(12px)}h1{font-size:20px;margin:0 0 5px}.subtitle{font-size:12px;color:#8fa5b8}.close{width:38px;height:38px;border:1px solid #31475a;border-radius:11px;background:#112235;color:#b9cad8;font-size:20px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:13px;padding:20px 26px 120px}.source{text-align:left;padding:9px;border:1px solid #23394c;border-radius:15px;background:#0e1c2b;color:#e6eff7;overflow:hidden}.source:hover,.source.selected{border-color:#49e0b4;background:#12332d;transform:translateY(-1px)}.preview{display:block;aspect-ratio:16/9;background:#03080d;border-radius:10px;overflow:hidden}.preview>img{width:100%;height:100%;object-fit:contain}.source-name{display:flex;align-items:center;gap:7px;font-weight:650;font-size:12px;margin:10px 3px 3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.icon{width:16px;height:16px}.kind{font-size:10px;color:#71899d;margin-left:3px}.footer{position:fixed;z-index:4;left:0;right:0;bottom:0;padding:14px 26px 18px;display:flex;align-items:center;justify-content:space-between;gap:20px;background:#0a1725f5;border-top:1px solid #23384b;backdrop-filter:blur(12px)}.audio{display:flex;align-items:flex-start;gap:10px;max-width:580px}.audio input{margin-top:3px;accent-color:#49e0b4}.audio strong,.audio small{display:block}.audio strong{font-size:12px}.audio small{font-size:10px;line-height:1.4;color:#8499ab;margin-top:3px}.actions{display:flex;gap:8px}.actions button{padding:11px 16px;border-radius:10px;font-weight:700;border:1px solid #31475a;background:#152638;color:#b8c8d5}.actions .share{background:#49e0b4;border-color:#49e0b4;color:#06261c}.actions .share:disabled{opacity:.4}@media(max-width:720px){.grid{grid-template-columns:1fr 1fr;padding-inline:15px}.footer{align-items:stretch;flex-direction:column}.actions button{flex:1}}
     </style></head><body><header class="top"><div><h1>Escolha o que compartilhar</h1><div class="subtitle">Nada será capturado antes de você confirmar.</div></div><button class="close" aria-label="Cancelar">×</button></header><main class="grid">${cards}</main><footer class="footer"><label class="audio" ${audioRequested ? '' : 'hidden'}><input id="audio" type="checkbox"><span><strong>Compartilhar áudio</strong><small id="audio-help">Selecione uma origem para ver as opções de áudio.</small></span></label><div class="actions"><button id="cancel">Cancelar</button><button id="share" class="share" disabled>Compartilhar</button></div></footer><script>
-      let selected=-1;let screen=false;const share=document.querySelector('#share');const audio=document.querySelector('#audio');const help=document.querySelector('#audio-help');document.querySelectorAll('.source').forEach(button=>button.onclick=()=>{document.querySelector('.source.selected')?.classList.remove('selected');button.classList.add('selected');selected=Number(button.dataset.index);screen=button.dataset.screen==='true';share.disabled=false;audio.disabled=!screen;audio.checked=screen;help.textContent=screen?'Inclui todos os sons do PC, inclusive Discord. Desmarque para transmitir somente vídeo.':'Janelas são transmitidas sem áudio para impedir que Discord e outros programas vazem. Para áudio isolado de um site, use o EntreTelas no Chrome/Edge e compartilhe uma guia.'});const done=value=>location.href='entretelas-picker:'+value;share.onclick=()=>done(selected+','+(screen&&audio.checked?'1':'0'));document.querySelector('#cancel').onclick=()=>done('cancel');document.querySelector('.close').onclick=()=>done('cancel');</script></body></html>`
+      const processAudio=${processAudioAvailable()};let selected=-1;let screen=false;const share=document.querySelector('#share');const audio=document.querySelector('#audio');const help=document.querySelector('#audio-help');document.querySelectorAll('.source').forEach(button=>button.onclick=()=>{document.querySelector('.source.selected')?.classList.remove('selected');button.classList.add('selected');selected=Number(button.dataset.index);screen=button.dataset.screen==='true';share.disabled=false;audio.disabled=!screen&&!processAudio;audio.checked=screen||processAudio;help.textContent=screen?'Inclui todos os sons do PC, inclusive Discord. Desmarque para transmitir somente vídeo.':processAudio?'Captura somente o áudio do aplicativo escolhido e de seus processos filhos. Outros programas, como Discord, ficam de fora.':'Captura por aplicativo indisponível nesta versão. A janela será transmitida sem áudio.'});const done=value=>location.href='entretelas-picker:'+value;share.onclick=()=>done(selected+','+(audio.checked?'1':'0'));document.querySelector('#cancel').onclick=()=>done('cancel');document.querySelector('.close').onclick=()=>done('cancel');</script></body></html>`
     picker.webContents.on('will-navigate', (event, url) => {
       if (!url.startsWith('entretelas-picker:')) return
       event.preventDefault()
@@ -70,7 +104,9 @@ async function chooseDisplaySource(request, callback) {
     const result = await showSourcePicker(sources, request.audioRequested)
     if (!result) return callback({})
     const isEntireScreen = result.source.id.startsWith('screen:')
+    const nativeAudio = request.audioRequested && result.audio && !isEntireScreen && startProcessAudioCapture(result.source)
     callback({ video: result.source, ...(request.audioRequested && result.audio && isEntireScreen ? { audio: 'loopback' } : {}) })
+    if (!nativeAudio && !isEntireScreen) stopProcessAudioCapture()
   } catch {
     callback({})
   }
@@ -85,6 +121,11 @@ function configureSession() {
   appSession.setPermissionCheckHandler((webContents, permission) => {
     return isTrustedUrl(webContents?.getURL?.() || '') && ['media', 'fullscreen'].includes(permission)
   })
+}
+
+function configureAudioBridge() {
+  ipcMain.handle('window-audio-active', () => Boolean(processAudioCapture))
+  ipcMain.on('window-audio-stop', stopProcessAudioCapture)
 }
 
 function createWindow() {
@@ -134,6 +175,6 @@ function configureUpdates() {
 if (!app.requestSingleInstanceLock()) app.quit()
 else {
   app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus() } })
-  app.whenReady().then(() => { configureSession(); createWindow(); configureUpdates() })
-  app.on('window-all-closed', () => app.quit())
+  app.whenReady().then(() => { configureSession(); configureAudioBridge(); createWindow(); configureUpdates() })
+  app.on('window-all-closed', () => { stopProcessAudioCapture(); app.quit() })
 }

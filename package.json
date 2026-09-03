@@ -53,6 +53,12 @@
       "desktop/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "native/bin/process-audio-capture.exe",
+        "to": "native/process-audio-capture.exe"
+      }
+    ],
     "win": {
       "target": [
         {

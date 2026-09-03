@@ -268,16 +268,23 @@ export default function App() {
   }, [send])
 
   const startRouteStats = (connectionId, pc) => {
+    let previousFrames = null; let previousBytes = null; let previousAt = null
     const inspect = async () => {
       try {
         const stats = await pc.getStats()
-        let pair = null; let outboundFps = null; let limitation = null
+        let pair = null; let outboundFps = null; let limitation = null; let sentMbps = null
         stats.forEach((report) => {
           if (report.type === 'transport' && report.selectedCandidatePairId) pair = stats.get(report.selectedCandidatePairId)
           if (!pair && report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) pair = report
           if (report.type === 'outbound-rtp' && report.kind === 'video') {
             if (Number.isFinite(report.framesPerSecond)) outboundFps = Math.round(report.framesPerSecond)
             if (report.qualityLimitationReason && report.qualityLimitationReason !== 'none') limitation = report.qualityLimitationReason
+            if (Number.isFinite(report.framesEncoded) && Number.isFinite(report.bytesSent) && previousAt !== null && report.timestamp > previousAt) {
+              const elapsed = report.timestamp - previousAt
+              outboundFps = Math.round((report.framesEncoded - previousFrames) * 1000 / elapsed)
+              sentMbps = Math.round(((report.bytesSent - previousBytes) * 8 / elapsed / 1000) * 10) / 10
+            }
+            if (Number.isFinite(report.framesEncoded) && Number.isFinite(report.bytesSent)) { previousFrames = report.framesEncoded; previousBytes = report.bytesSent; previousAt = report.timestamp }
           }
         })
         if (!pair) return
@@ -286,11 +293,11 @@ export default function App() {
         const protocol = String(local?.protocol || remote?.protocol || '').toUpperCase()
         const rttMs = Number.isFinite(pair.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : null
         const availableMbps = Number.isFinite(pair.availableOutgoingBitrate) ? Math.round(pair.availableOutgoingBitrate / 100_000) / 10 : null
-        setViewers((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], route, protocol, rttMs, availableMbps, limitation, ...(outboundFps ? { fps: outboundFps } : {}) } } : current)
+        setViewers((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], route, protocol, rttMs, availableMbps, sentMbps, limitation, ...(Number.isFinite(outboundFps) ? { fps: outboundFps } : {}) } } : current)
       } catch { /* route statistics are optional on older browsers */ }
     }
     inspect()
-    const timer = setInterval(inspect, 3000)
+    const timer = setInterval(inspect, 1000)
     statsRef.current.set(connectionId, timer)
   }
 
@@ -491,7 +498,7 @@ export default function App() {
   const viewerNames = [...new Set(Object.values(viewers).map((viewer) => userName(viewer.peerId)))]
   const viewerRoutes = [...new Set(Object.values(viewers).map((viewer) => viewer.route).filter((route) => route && route !== 'connecting'))]
   const routeBaseLabel = !viewerNames.length ? 'sem espectadores' : viewerRoutes.length === 0 ? 'detectando conexão' : viewerRoutes.length > 1 ? 'conexão mista: P2P + TURN' : viewerRoutes[0] === 'turn' ? 'servidor auxiliar (TURN)' : 'conexão direta P2P'
-  const routeDetails = [...new Set(Object.values(viewers).map((viewer) => [viewer.protocol, Number.isFinite(viewer.rttMs) ? `${viewer.rttMs} ms` : '', Number.isFinite(viewer.availableMbps) ? `${viewer.availableMbps} Mbps disponíveis` : '', viewer.limitation ? `limite: ${viewer.limitation}` : ''].filter(Boolean).join(' · ')).filter(Boolean))]
+  const routeDetails = Object.values(viewers).map((viewer) => `${userName(viewer.peerId)}: ${[viewer.route === 'turn' ? 'TURN' : viewer.route === 'p2p' ? 'P2P' : '', viewer.protocol, Number.isFinite(viewer.fps) ? `${viewer.fps} FPS` : '', Number.isFinite(viewer.sentMbps) ? `${viewer.sentMbps} Mbps enviados` : '', Number.isFinite(viewer.rttMs) ? `${viewer.rttMs} ms` : '', Number.isFinite(viewer.availableMbps) ? `${viewer.availableMbps} Mbps disponíveis` : '', viewer.limitation ? `limite: ${viewer.limitation}` : ''].filter(Boolean).join(' · ')}`)
   const routeLabel = `${routeBaseLabel}${routeDetails.length ? ` · ${routeDetails.join(' / ')}` : ''}`
   const outboundFpsValues = Object.values(viewers).map((viewer) => viewer.fps).filter(Number.isFinite)
   const outboundFpsLabel = outboundFpsValues.length ? Math.min(...outboundFpsValues) === Math.max(...outboundFpsValues) ? `~${outboundFpsValues[0]} FPS enviados` : `~${Math.min(...outboundFpsValues)}–${Math.max(...outboundFpsValues)} FPS enviados` : ''

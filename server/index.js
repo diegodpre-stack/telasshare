@@ -197,8 +197,11 @@ app.get('/api/ice-servers', async (req, res) => {
     })
     const result = await response.json()
     if (!response.ok || !Array.isArray(result.iceServers) || result.iceServers.length === 0) throw new Error('TURN credentials unavailable')
-    const iceServers = result.iceServers.filter((serverEntry) => serverEntry && (typeof serverEntry.urls === 'string' || Array.isArray(serverEntry.urls)))
-    if (iceServers.length === 0) throw new Error('Invalid TURN response')
+    const cloudflareServers = result.iceServers.filter((serverEntry) => serverEntry && (typeof serverEntry.urls === 'string' || Array.isArray(serverEntry.urls)))
+    if (cloudflareServers.length === 0) throw new Error('Invalid TURN response')
+    // Keep Google's STUN candidate as well: some networks allow port 19302 but block Cloudflare STUN on 3478/53.
+    // TURN remains available, but a working direct candidate keeps its normal ICE priority.
+    const iceServers = [...fallback, ...cloudflareServers]
     return res.json({ iceServers, turnEnabled: iceServers.some((entry) => JSON.stringify(entry.urls).includes('turn:') || JSON.stringify(entry.urls).includes('turns:')) })
   } catch (error) {
     console.error('Could not generate temporary TURN credentials:', error.message)

@@ -181,7 +181,7 @@ app.get('/api/ice-servers', async (req, res) => {
   if (!authenticateRoomRequest(req, res)) return
 
   res.set('Cache-Control', 'no-store')
-  const fallback = [{ urls: ['stun:stun.l.google.com:19302'] }]
+  const fallback = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302', 'stun:stun.nextcloud.com:443'] }]
   const configuration = turnConfiguration()
   if (!configuration.enabled) return res.json({ iceServers: fallback, turnEnabled: false, reason: 'turn-disabled' })
   if (!configuration.keyId || !configuration.credentialToken) return res.json({ iceServers: fallback, turnEnabled: false, reason: 'turn-not-configured' })

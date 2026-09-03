@@ -11,8 +11,9 @@ const resolutions = { auto: { label: 'Auto' }, '720p': { label: '720p', width: 1
 const bitratePresets = { low: 2_500_000, medium: 8_000_000, high: 14_000_000 }
 const bitrateLabels = { low: 'Baixa', medium: 'Média', high: 'Alta', custom: 'Personalizada' }
 const roleRanks = { member: 0, owner: 1, admin: 2, superadmin: 3 }
+const defaultStunUrls = 'stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:stun2.l.google.com:19302,stun:stun.nextcloud.com:443'
 const staticIceServers = () => {
-  const stun = (import.meta.env.VITE_STUN_URLS || 'stun:stun.l.google.com:19302').split(',').map((v) => v.trim()).filter(Boolean)
+  const stun = (import.meta.env.VITE_STUN_URLS || defaultStunUrls).split(',').map((v) => v.trim()).filter(Boolean)
   const turn = (import.meta.env.VITE_TURN_URLS || '').split(',').map((v) => v.trim()).filter(Boolean)
   const servers = stun.length ? [{ urls: stun }] : []
   if (turn.length) servers.push({ urls: turn, username: import.meta.env.VITE_TURN_USERNAME || '', credential: import.meta.env.VITE_TURN_CREDENTIAL || '' })
@@ -249,7 +250,8 @@ export default function App() {
   }, [closeConnection])
 
   const createPeer = useCallback((connectionId, peerId, role, mode = 'auto') => {
-    const pc = new RTCPeerConnection({ iceServers: selectIceServers(iceServersRef.current, mode === 'turn' ? 'udp' : 'direct'), iceTransportPolicy: mode === 'turn' ? 'relay' : 'all' })
+    // Pre-gathering shortens the direct stage, which is what keeps traffic off the metered relay.
+    const pc = new RTCPeerConnection({ iceServers: selectIceServers(iceServersRef.current, mode === 'turn' ? 'udp' : 'direct'), iceTransportPolicy: mode === 'turn' ? 'relay' : 'all', iceCandidatePoolSize: 4 })
     const entry = { pc, peerId, role, mode, pendingCandidates: earlyCandidatesRef.current.get(connectionId) || [], disconnectTimer: null, restarting: false, settled: false }; earlyCandidatesRef.current.delete(connectionId); pcsRef.current.set(connectionId, entry)
     entry.iceDiagnostics = { gathered: 0, received: entry.pendingCandidates.length, applied: 0, rejected: 0, errors: [] }
     entry.turnTransport = mode === 'turn' ? 'udp' : 'direct'

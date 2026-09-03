@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MediaDiagnostics from './MediaDiagnostics.jsx'
 import { selectIceServers } from './icePolicy.js'
+import { applySenderSettings } from './senderSettings.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -205,6 +206,21 @@ export default function App() {
   const localStreamRef = useRef(null)
   const statsRef = useRef(new Map())
   const knownUsersRef = useRef(null)
+  const transmissionSettingsRef = useRef({ fps, maxBitrate: bitratePresets[quality] })
+  const captureSettingsQueue = useRef(Promise.resolve())
+  useEffect(() => {
+    transmissionSettingsRef.current = { fps, maxBitrate: quality === 'custom' ? Math.round(customMbps * 1_000_000) : bitratePresets[quality] }
+    for (const entry of pcsRef.current.values()) entry.configureSender?.()
+    const track = localStreamRef.current?.getVideoTracks()[0]
+    if (!track || track.readyState !== 'live') return
+    const preset = resolutions[resolution]
+    captureSettingsQueue.current = captureSettingsQueue.current.catch(() => {}).then(async () => {
+      if (track !== localStreamRef.current?.getVideoTracks()[0] || track.readyState !== 'live') return
+      try {
+        await track.applyConstraints({ frameRate: { ideal: fps, max: fps }, ...(preset.width ? { width: { ideal: preset.width, max: preset.width }, height: { ideal: preset.height, max: preset.height } } : {}) })
+      } catch { setNotice('A origem não aceitou a nova resolução/FPS. A transmissão continua com a captura anterior.') }
+    })
+  }, [fps, quality, customMbps, resolution])
   const send = useCallback((message) => { if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message)) }, [])
 
   const closeConnection = useCallback((connectionId, notify = false) => {
@@ -547,18 +563,17 @@ export default function App() {
     try {
       const stream = localStreamRef.current; if (!stream) return
       const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter', mode); const videoTrack = stream.getVideoTracks()[0]
-      const sender = entry.pc.addTrack(videoTrack, stream); const maxBitrate = quality === 'custom' ? Math.round(customMbps * 1_000_000) : bitratePresets[quality]
-      const configureSender = async () => {
-        const parameters = sender.getParameters()
-        if (!parameters.encodings?.length) return
-        for (const encoding of parameters.encodings) { encoding.maxBitrate = maxBitrate; encoding.maxFramerate = fps }
-        parameters.degradationPreference = 'maintain-framerate'
-        try { await sender.setParameters(parameters) }
-        catch {
-          const fallback = sender.getParameters()
-          for (const encoding of fallback.encodings || []) { encoding.maxBitrate = maxBitrate; encoding.maxFramerate = fps }
-          try { await sender.setParameters(fallback) } catch { setNotice('Este navegador não aceitou os limites de envio; usando adaptação padrão.') }
-        }
+      const sender = entry.pc.addTrack(videoTrack, stream)
+      let settingsQueue = Promise.resolve()
+      const configureSender = () => {
+        settingsQueue = settingsQueue.catch(() => {}).then(async () => {
+          if (entry.pc.connectionState === 'closed') return
+          try {
+            const settings = { ...transmissionSettingsRef.current }
+            if (await applySenderSettings(sender, settings)) entry.appliedSettings = settings
+          } catch { setNotice('Este navegador não aceitou os limites de envio; usando adaptação padrão.') }
+        })
+        return settingsQueue
       }
       entry.configureSender = configureSender
       await configureSender()

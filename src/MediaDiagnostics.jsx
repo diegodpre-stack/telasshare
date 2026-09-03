@@ -32,7 +32,7 @@ export default function MediaDiagnostics({ peers }) {
               iceState: entry.pc.iceConnectionState, gatheringState: entry.pc.iceGatheringState,
               signalingState: entry.pc.signalingState, policy: entry.pc.getConfiguration().iceTransportPolicy, transportStage: entry.turnTransport ?? null,
               localDescription: entry.pc.localDescription?.type ?? null, remoteDescription: entry.pc.remoteDescription?.type ?? null,
-              candidateCounts, pairStates, counters: entry.iceDiagnostics ? structuredClone(entry.iceDiagnostics) : null,
+              candidateCounts, pairStates, appliedSenderSettings: entry.appliedSettings ? { ...entry.appliedSettings } : null, counters: entry.iceDiagnostics ? structuredClone(entry.iceDiagnostics) : null,
             }
             for (const row of result.rows.length ? result.rows : [{ direction: entry.role === 'transmitter' ? 'envio' : 'recepção' }]) rows.push({ connection: state.label, state: entry.pc.connectionState, negotiation, ...row })
           } catch { /* A peer may close while sampling. */ }

@@ -189,6 +189,7 @@ export default function App() {
   const [quality, setQuality] = useState('medium')
   const [customMbps, setCustomMbps] = useState(8)
   const [screenSize, setScreenSize] = useState('medium')
+  const [watchMode, setWatchMode] = useState('auto')
   const [shareAudio, setShareAudio] = useState(true)
   const [audioStatus, setAudioStatus] = useState('idle')
   const [showSelfPreview, setShowSelfPreview] = useState(false)
@@ -205,7 +206,7 @@ export default function App() {
     const entry = pcsRef.current.get(connectionId)
     if (!entry) return
     if (notify) send({ type: 'stop', to: entry.peerId, connectionId })
-    clearInterval(statsRef.current.get(connectionId)); statsRef.current.delete(connectionId); clearTimeout(entry.disconnectTimer)
+    clearInterval(statsRef.current.get(connectionId)); statsRef.current.delete(connectionId); clearTimeout(entry.disconnectTimer); clearTimeout(entry.fallbackTimer)
     entry.pc.close(); pcsRef.current.delete(connectionId)
     if (entry.role === 'viewer') setRemoteScreens((current) => { const next = { ...current }; delete next[connectionId]; return next })
     else setViewers((current) => { const next = { ...current }; delete next[connectionId]; return next })
@@ -225,16 +226,17 @@ export default function App() {
     setAudioStatus('idle')
   }, [closeConnection])
 
-  const createPeer = useCallback((connectionId, peerId, role) => {
-    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current, iceTransportPolicy: 'all' })
-    const entry = { pc, peerId, role, pendingCandidates: [], disconnectTimer: null, restarting: false }; pcsRef.current.set(connectionId, entry)
+  const createPeer = useCallback((connectionId, peerId, role, mode = 'auto') => {
+    const directServers = iceServersRef.current.map((server) => ({ ...server, urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url) => /^stuns?:/.test(url)) })).filter((server) => server.urls.length)
+    const pc = new RTCPeerConnection({ iceServers: mode === 'turn' ? iceServersRef.current : directServers, iceTransportPolicy: mode === 'turn' ? 'relay' : 'all' })
+    const entry = { pc, peerId, role, mode, pendingCandidates: [], disconnectTimer: null, restarting: false }; pcsRef.current.set(connectionId, entry)
     entry.restart = async () => {
       if (entry.restarting || pc.signalingState !== 'stable' || pc.connectionState === 'closed') return
       entry.restarting = true
       try {
         pc.restartIce()
         const offer = await pc.createOffer({ iceRestart: true }); await pc.setLocalDescription(offer)
-        send({ type: 'signal', to: peerId, connectionId, description: pc.localDescription })
+        send({ type: 'signal', to: peerId, connectionId, mode: entry.mode, description: pc.localDescription })
       } catch { entry.restarting = false }
     }
     pc.onicecandidate = ({ candidate }) => candidate && send({ type: 'signal', to: peerId, connectionId, candidate: candidate.toJSON() })
@@ -247,6 +249,20 @@ export default function App() {
       }, 5_000)
     }
     pc.onconnectionstatechange = () => { if (pc.connectionState === 'closed' && pcsRef.current.get(connectionId)?.pc === pc) closeConnection(connectionId, false) }
+    if (role === 'transmitter') entry.fallbackTimer = setTimeout(() => {
+      if (['connected', 'completed'].includes(pc.iceConnectionState) || pc.connectionState === 'closed') return
+      if (mode === 'auto' && iceServersRef.current.some((server) => JSON.stringify(server.urls).includes('turn'))) {
+        entry.mode = 'turn'; entry.restarting = false
+        pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'relay' })
+        entry.restart()
+        entry.fallbackTimer = setTimeout(() => {
+          if (!['connected', 'completed'].includes(pc.iceConnectionState) && pc.connectionState !== 'closed') closeConnection(connectionId, true)
+        }, 15000)
+      } else {
+        closeConnection(connectionId, true)
+        setNotice('A conexão escolhida não foi possível. Peça ao espectador para tentar outro modo.')
+      }
+    }, 12000)
     return entry
   }, [closeConnection, send])
 
@@ -324,7 +340,7 @@ export default function App() {
       let entry = pcsRef.current.get(message.connectionId)
       if (!entry) {
         if (message.description?.type !== 'offer') return
-        entry = createPeer(message.connectionId, message.from, 'viewer')
+        entry = createPeer(message.connectionId, message.from, 'viewer', message.mode || 'auto')
         entry.pc.ontrack = ({ streams, track }) => {
           setRemoteScreens((current) => {
             const existing = current[message.connectionId]
@@ -337,6 +353,7 @@ export default function App() {
         setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, waiting: false, stream: null, hasAudio: false } }))
       }
       if (message.description) {
+        if (message.mode === 'turn' && entry.mode === 'auto') { entry.mode = 'turn'; entry.pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'relay' }) }
         await entry.pc.setRemoteDescription(message.description)
         for (const candidate of entry.pendingCandidates.splice(0)) await entry.pc.addIceCandidate(candidate)
         if (message.description.type === 'offer') { const answer = await entry.pc.createAnswer(); await entry.pc.setLocalDescription(answer); send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription }) }
@@ -378,10 +395,10 @@ export default function App() {
           knownUsersRef.current = nextIds
           setUsers(message.users)
         }
-        else if (message.type === 'watch-request') { if (localStreamRef.current) playChime('viewer'); shareWith(message.from) }
+        else if (message.type === 'watch-request') { if (localStreamRef.current) playChime('viewer'); shareWith(message.from, message.mode) }
         else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); handleSignal(message) }
         else if (message.type === 'restart-request') pcsRef.current.get(message.connectionId)?.restart?.()
-        else if (message.type === 'stop') closeConnection(message.connectionId, false)
+        else if (message.type === 'stop') { closeConnection(message.connectionId, false); setNotice('Visualização encerrada. Se não conectou, tente outro modo de conexão.') }
         else if (message.type === 'peer-left') { for (const [id, entry] of pcsRef.current) if (entry.peerId === message.id) closeConnection(id, false); setRemoteScreens((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value.peerId !== message.id))) }
         else if (message.type === 'kicked' || message.type === 'banned') { setAccessSession(''); setJoined(false); setNotice(message.type === 'banned' ? 'Você foi banido da sala.' : 'Você foi removido da sala.') }
         else if (message.type === 'error') setNotice(message.message)
@@ -492,10 +509,10 @@ export default function App() {
     }
     catch (error) { setNotice(error?.name === 'NotAllowedError' ? 'Você cancelou a escolha da tela.' : 'Não foi possível iniciar a captura.') }
   }
-  const shareWith = async (peerId) => {
+  const shareWith = async (peerId, mode = 'auto') => {
     try {
       const stream = localStreamRef.current; if (!stream) return
-      const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter'); const videoTrack = stream.getVideoTracks()[0]
+      const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter', mode); const videoTrack = stream.getVideoTracks()[0]
       const sender = entry.pc.addTrack(videoTrack, stream); const maxBitrate = quality === 'custom' ? Math.round(customMbps * 1_000_000) : bitratePresets[quality]
       try { const parameters = sender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = maxBitrate; parameters.encodings[0].maxFramerate = fps; await sender.setParameters(parameters) } catch { /* best effort */ }
       const audioTrack = stream.getAudioTracks()[0]
@@ -503,11 +520,11 @@ export default function App() {
         const audioSender = entry.pc.addTrack(audioTrack, stream)
         try { const parameters = audioSender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = 256_000; await audioSender.setParameters(parameters) } catch { /* best effort */ }
       }
-      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, description: entry.pc.localDescription })
+      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, description: entry.pc.localDescription })
       setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); startRouteStats(connectionId, entry.pc); setNotice('Novo espectador conectado à sua transmissão.')
     } catch { setNotice('Não foi possível conectar o novo espectador.') }
   }
-  const watch = (user) => { setRemoteScreens((current) => ({ ...current, [`waiting-${user.id}`]: { peerId: user.id, waiting: true } })); send({ type: 'watch-request', to: user.id }); setNotice(`Conectando à tela de ${user.name}…`) }
+  const watch = (user) => { setRemoteScreens((current) => ({ ...current, [`waiting-${user.id}`]: { peerId: user.id, waiting: true } })); send({ type: 'watch-request', to: user.id, mode: watchMode }); setNotice(`Conectando à tela de ${user.name}…`) }
   const moderate = (user, action) => send({ type: 'moderate', to: user.id, action })
 
   const peers = useMemo(() => users.filter((user) => user.id !== selfId), [users, selfId])
@@ -530,6 +547,7 @@ export default function App() {
     {localStreamRef.current && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {resolutions[resolution].label} · preferência {fps} FPS · {audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={() => setShowSelfPreview(true)}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
+    <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>
     <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><label className="quality-toggle" htmlFor="quality-toggle"><SlidersHorizontal size={16} /><span>Configurar transmissão</span></label></div>
     <div className={`workspace multi-workspace${showPeople ? '' : ' people-hidden'}`}>
       {showPeople && <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length + 1}</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Compartilhe o nome e a senha desta sala com seus amigos.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions"><button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>{isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>}

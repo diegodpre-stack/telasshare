@@ -280,8 +280,9 @@ wss.on('connection', (socket, request) => {
     if (!target || target.id === id || target.roomId !== sender.roomId) return safeSend(socket, { type: 'error', message: 'Usuário indisponível.' })
 
     if (message.type === 'watch-request') {
+      if (message.mode !== undefined && !['auto', 'p2p', 'turn'].includes(message.mode)) return safeSend(socket, { type: 'error', message: 'Modo de conexão inválido.' })
       if (!target.broadcasting) return safeSend(socket, { type: 'error', message: 'Esta transmissão não está mais disponível.' })
-      return safeSend(target.socket, { type: 'watch-request', from: id, fromName: sender.name })
+      return safeSend(target.socket, { type: 'watch-request', from: id, fromName: sender.name, mode: message.mode || 'auto' })
     }
     if (message.type === 'restart-request') {
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })
@@ -295,11 +296,12 @@ wss.on('connection', (socket, request) => {
       return
     }
     if (message.type === 'signal') {
+      if (message.mode !== undefined && !['auto', 'p2p', 'turn'].includes(message.mode)) return safeSend(socket, { type: 'error', message: 'Modo de conexão inválido.' })
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })
       const descriptionOk = message.description === undefined || validDescription(message.description)
       const candidateOk = message.candidate === undefined || validCandidate(message.candidate)
       if (!descriptionOk || !candidateOk || (message.description === undefined && message.candidate === undefined)) return safeSend(socket, { type: 'error', message: 'Sinal WebRTC inválido.' })
-      return safeSend(target.socket, { type: 'signal', from: id, connectionId: message.connectionId, description: message.description, candidate: message.candidate })
+      return safeSend(target.socket, { type: 'signal', from: id, connectionId: message.connectionId, mode: message.mode, description: message.description, candidate: message.candidate })
     }
     if (message.type === 'stop') {
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })

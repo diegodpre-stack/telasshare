@@ -1,0 +1,58 @@
+import { useEffect, useRef, useState } from 'react'
+import { summarizeStats } from './mediaDiagnostics.js'
+
+export default function MediaDiagnostics({ peers }) {
+  const history = useRef([])
+  const [latest, setLatest] = useState([])
+  useEffect(() => {
+    let disposed = false, busy = false, sequence = 0
+    const states = new Map()
+    const sample = async () => {
+      if (busy) return
+      busy = true
+      const rows = []
+      try {
+        for (const [id, entry] of peers.current) {
+          let state = states.get(id)
+          if (!state) { state = { label: `Conexão ${++sequence}`, previous: new Map() }; states.set(id, state) }
+          try {
+            const result = summarizeStats(await entry.pc.getStats(), state.previous)
+            if (disposed) return
+            state.previous = result.next
+            for (const row of result.rows) rows.push({ connection: state.label, state: entry.pc.connectionState, ...row })
+          } catch { /* A peer may close while sampling. */ }
+        }
+        for (const id of states.keys()) if (!peers.current.has(id)) states.delete(id)
+        if (!disposed) {
+          setLatest(rows)
+          if (rows.length) history.current.push({ time: new Date().toISOString(), rows, pageHidden: document.hidden })
+          // Ten minutes at two-second intervals; no network upload or persistent storage.
+          history.current = history.current.filter((s) => Date.parse(s.time) >= Date.now() - 600_000).slice(-300)
+        }
+      } finally { busy = false }
+    }
+    const timer = setInterval(sample, 2000)
+    return () => { disposed = true; clearInterval(timer) }
+  }, [peers])
+  const download = () => {
+    const blob = new Blob([JSON.stringify({ schema: 1, generatedAt: new Date().toISOString(), sampleIntervalMs: 2000, note: 'null = indisponível; perda total é cumulativa; relayProtocol é apenas do cliente local; FPS de captura vem de media-source, não da prévia.', samples: history.current }, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob), link = document.createElement('a')
+    link.href = url; link.download = `entretelas-diagnostico-${Date.now()}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+  const value = (v, unit = '') => v == null ? 'indisponível' : `${v}${unit}`
+  return <details style={{ margin: '12px 0', padding: 12, border: '1px solid #314759', borderRadius: 10 }}>
+    <summary>Diagnóstico da transmissão (avançado)</summary>
+    <p>Histórico automático dos últimos 10 minutos nesta sala. Ao ocorrer uma queda, baixe o relatório aqui e peça ao espectador afetado para baixar o dele também. Não inclui nomes, IPs, senhas ou conteúdo da tela.</p>
+    <button onClick={download} disabled={!history.current.length}>Baixar relatório</button>
+    <p>“CPU” indica limitação de processamento informada pelo navegador, não uma medição de uso da GPU. “Bandwidth” indica adaptação à rede. Uma cena parada pode gerar poucos quadros normalmente.</p>
+    {!latest.length && <p>Aguardando uma transmissão com espectador.</p>}
+    {latest.map((row, index) => <div key={`${row.connection}-${index}`} style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
+      <strong>{row.connection} · {row.direction} · {row.route || row.state}</strong>
+      <p>{value(row.width)} × {value(row.height)} · {value(row.fps, ' FPS')} · {value(row.mbps, ' Mbps')}<br />
+        Codec: {value(row.codec)} · Limitação: {value(row.limitation)} · {row.direction === 'envio' ? 'Codificação' : 'Decodificação'}: {value(row.frameProcessingMs, ' ms/quadro')}<br />
+        Captura (quando informada): {value(row.captureFps, ' FPS')} · Ping: {value(row.rttMs, ' ms')} · Banda estimada: {value(row.availableMbps, ' Mbps')}<br />
+        ICE: {value(row.iceProtocol)} · Transporte até TURN local: {value(row.localRelayProtocol)}<br />
+        Pacotes perdidos acumulados: {value(row.packetsLostTotal)} · Pedidos de retransmissão no intervalo: {value(row.nackInterval)}</p>
+    </div>)}
+  </details>
+}

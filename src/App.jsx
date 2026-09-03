@@ -188,6 +188,7 @@ export default function App() {
   const [users, setUsers] = useState([])
   const [remoteScreens, setRemoteScreens] = useState({})
   const [viewers, setViewers] = useState({})
+  const [broadcasting, setBroadcasting] = useState(false)
   const [notice, setNotice] = useState('Entre em uma sala privada para encontrar seus amigos.')
   const [resolution, setResolution] = useState('1080p')
   const [fps, setFps] = useState(60)
@@ -240,6 +241,7 @@ export default function App() {
     window.electronAPI?.stopWindowAudio?.()
     setShowSelfPreview(false)
     setAudioStatus('idle')
+    setBroadcasting(false)
     send({ type: 'broadcast-stop' }); setViewers({}); setNotice('Sua transmissão foi encerrada. As telas que você assiste continuam abertas.')
   }, [closeConnection, send])
   const closeAll = useCallback(() => {
@@ -247,7 +249,18 @@ export default function App() {
     for (const id of [...pcsRef.current.keys()]) closeConnection(id, false)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
     setAudioStatus('idle')
+    setBroadcasting(false)
   }, [closeConnection])
+
+  // A capture nobody is watching burns GPU and, on relay, quota. Never let one outlive the room.
+  useEffect(() => {
+    if (!broadcasting || Object.keys(viewers).length) return
+    const timer = setTimeout(() => {
+      stopSharing(true)
+      setNotice('Sua transmissão foi encerrada automaticamente: ficou 5 minutos sem nenhum espectador.')
+    }, 5 * 60_000)
+    return () => clearTimeout(timer)
+  }, [broadcasting, viewers, stopSharing])
 
   const createPeer = useCallback((connectionId, peerId, role, mode = 'auto') => {
     // Pre-gathering shortens the direct stage, which is what keeps traffic off the metered relay.
@@ -569,7 +582,7 @@ export default function App() {
   }
   const startBroadcast = async () => {
     try {
-      const stream = await getCapture(); send({ type: 'broadcast-start' })
+      const stream = await getCapture(); send({ type: 'broadcast-start' }); setBroadcasting(true)
       setNotice(!shareAudio ? 'Sua transmissão está disponível para todos na sala (sem áudio).'
         : stream.getAudioTracks().length ? 'Sua transmissão está disponível para todos na sala, com o áudio do que você escolheu compartilhar.'
         : 'Transmissão iniciada, mas a origem escolhida não forneceu áudio. Tente uma aba ou use uma opção de áudio oferecida pelo navegador.')

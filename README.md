@@ -61,7 +61,7 @@ Libere as portas TCP `5173` e `8787` no firewall do PC servidor. Nos dois PCs, a
 
 ## Pela internet
 
-O deploy automático do Render fica desativado em `render.yaml`. Assim, commits podem ser enviados ao GitHub sem reiniciar o servidor e interromper salas em uso. Quando uma versão estiver pronta, use **Manual Deploy → Deploy latest commit** no painel do Render. O deploy manual ainda reinicia o servidor, então faça isso quando ninguém estiver transmitindo.
+O deploy automático do Render está ativado em `render.yaml` e no painel (Auto-Deploy: On Commit). Cada push para `main` publica a nova versão automaticamente. O deploy reinicia o servidor e pode interromper salas e transmissões em uso.
 
 ### Opção simples: Render
 

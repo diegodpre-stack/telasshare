@@ -99,7 +99,7 @@ app.post('/api/rooms', (req, res) => {
   if (roomName.length < 2 || password.length < 4 || password.length > 128) return res.status(400).json({ error: 'Informe um nome e uma senha com pelo menos 4 caracteres.' })
   const key = roomKey(roomName)
   if (rooms.has(key)) return res.status(409).json({ error: 'Não foi possível criar essa sala. Escolha outro nome.' })
-  const room = { id: crypto.randomUUID(), name: roomName, password: hashPassword(password), bannedNames: new Set(), createdAt: Date.now(), deleteTimer: null }
+  const room = { id: crypto.randomUUID(), name: roomName, password: hashPassword(password), ownerSub: authenticated.sub, bannedNames: new Set(), createdAt: Date.now(), deleteTimer: null }
   rooms.set(key, room)
   scheduleRoomDeletion(room, key)
   res.status(201).json({ room: { id: room.id, name: room.name } })
@@ -119,7 +119,8 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
   }
   loginAttempts.delete(attempt.ip)
   scheduleRoomDeletion(room, entry[0])
-  res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: authenticated.role, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: authenticated.role, roomName: room.name })
+  const roomRole = authenticated.role === 'member' && room.ownerSub === authenticated.sub ? 'owner' : authenticated.role
+  res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: roomRole, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: roomRole, roomName: room.name })
 })
 
 const turnConfiguration = () => ({
@@ -233,6 +234,7 @@ const isObject = (value) => value !== null && typeof value === 'object' && !Arra
 const validDescription = (value) => isObject(value) && ['offer', 'answer'].includes(value.type) && typeof value.sdp === 'string' && value.sdp.length < 100_000
 const validCandidate = (value) => value === null || (isObject(value) && (value.candidate === undefined || typeof value.candidate === 'string'))
 const validConnectionId = (value) => typeof value === 'string' && /^[a-zA-Z0-9-]{8,64}$/.test(value)
+const roleRank = { member: 0, owner: 1, admin: 2, superadmin: 3 }
 
 wss.on('connection', (socket, request) => {
   const sessionToken = new URL(request.url, 'http://localhost').searchParams.get('session')
@@ -255,10 +257,11 @@ wss.on('connection', (socket, request) => {
       if (roomClients(room.id).some((client) => client.id !== id && client.name.toLocaleLowerCase('pt-BR') === name.toLocaleLowerCase('pt-BR'))) {
         safeSend(socket, { type: 'error', message: 'Este nome de usuário já está online.' }); return socket.close(1008, 'Nome em uso')
       }
-      clients.set(id, { id, name, role: ['admin', 'superadmin'].includes(authenticated.role) ? authenticated.role : 'member', roomId: room.id, broadcasting: false, socket })
+      const role = Object.hasOwn(roleRank, authenticated.role) ? authenticated.role : 'member'
+      clients.set(id, { id, name, role, roomId: room.id, broadcasting: false, socket })
       clearTimeout(room.deleteTimer); room.deleteTimer = null
       registered = true
-      safeSend(socket, { type: 'welcome', id, role: ['admin', 'superadmin'].includes(authenticated.role) ? authenticated.role : 'member', roomName: room.name })
+      safeSend(socket, { type: 'welcome', id, role, roomName: room.name })
       return broadcastUsers(room.id)
     }
     const sender = clients.get(id)
@@ -278,7 +281,7 @@ wss.on('connection', (socket, request) => {
       return safeSend(target.socket, { type: 'restart-request', from: id, connectionId: message.connectionId })
     }
     if (message.type === 'moderate') {
-      if (!['admin', 'superadmin'].includes(sender.role) || !['kick', 'ban'].includes(message.action)) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })
+      if (!['owner', 'admin', 'superadmin'].includes(sender.role) || !['kick', 'ban'].includes(message.action) || roleRank[sender.role] <= roleRank[target.role]) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })
       if (message.action === 'ban') room.bannedNames.add(target.name.toLocaleLowerCase('pt-BR'))
       safeSend(target.socket, { type: message.action === 'ban' ? 'banned' : 'kicked' })
       target.socket.close(1008, message.action === 'ban' ? 'Banido' : 'Expulso')

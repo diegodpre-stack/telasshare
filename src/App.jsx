@@ -7,6 +7,7 @@ const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL || `${location.protocol === '
 const resolutions = { auto: { label: 'Auto' }, '720p': { label: '720p', width: 1280, height: 720 }, '1080p': { label: '1080p', width: 1920, height: 1080 }, '1440p': { label: '1440p', width: 2560, height: 1440 } }
 const bitratePresets = { low: 2_500_000, medium: 8_000_000, high: 14_000_000 }
 const bitrateLabels = { low: 'Baixa', medium: 'Média', high: 'Alta', custom: 'Personalizada' }
+const roleRanks = { member: 0, owner: 1, admin: 2, superadmin: 3 }
 const staticIceServers = () => {
   const stun = (import.meta.env.VITE_STUN_URLS || 'stun:stun.l.google.com:19302').split(',').map((v) => v.trim()).filter(Boolean)
   const turn = (import.meta.env.VITE_TURN_URLS || '').split(',').map((v) => v.trim()).filter(Boolean)
@@ -67,6 +68,28 @@ async function attachDesktopWindowAudio(stream, onError) {
 const FRIEND_SITE_URL = 'https://osrsiron.com'
 const PORTABLE_DOWNLOAD_URL = 'https://github.com/diegodpre-stack/telasshare/releases/latest/download/EntreTelas-Portable.exe'
 const INSTALLER_DOWNLOAD_URL = 'https://github.com/diegodpre-stack/telasshare/releases/latest/download/EntreTelas-Setup.exe'
+const playChime = (kind) => {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext
+  if (!AudioContextClass) return
+  const context = new AudioContextClass()
+  const notes = kind === 'viewer' ? [659.25, 783.99] : [523.25, 659.25]
+  const start = context.currentTime
+  const master = context.createGain()
+  master.gain.setValueAtTime(0.0001, start)
+  master.gain.exponentialRampToValueAtTime(0.055, start + 0.015)
+  master.gain.exponentialRampToValueAtTime(0.0001, start + 0.42)
+  master.connect(context.destination)
+  notes.forEach((frequency, index) => {
+    const oscillator = context.createOscillator()
+    const gain = context.createGain()
+    oscillator.type = 'sine'; oscillator.frequency.value = frequency
+    gain.gain.value = index ? 0.45 : 0.7
+    oscillator.connect(gain); gain.connect(master)
+    oscillator.start(start + index * 0.09); oscillator.stop(start + 0.38)
+  })
+  context.resume().catch(() => {})
+  setTimeout(() => context.close().catch(() => {}), 600)
+}
 export function GlobalActions() {
   const [confirmation, setConfirmation] = useState('')
   const openSite = () => {
@@ -141,6 +164,7 @@ export default function App() {
   const [connection, setConnection] = useState('offline')
   const [selfId, setSelfId] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
+  const [moderationRole, setModerationRole] = useState('member')
   const [users, setUsers] = useState([])
   const [remoteScreens, setRemoteScreens] = useState({})
   const [viewers, setViewers] = useState({})
@@ -158,6 +182,7 @@ export default function App() {
   const iceServersRef = useRef(staticIceServers())
   const localStreamRef = useRef(null)
   const statsRef = useRef(new Map())
+  const knownUsersRef = useRef(null)
   const send = useCallback((message) => { if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message)) }, [])
 
   const closeConnection = useCallback((connectionId, notify = false) => {
@@ -279,9 +304,14 @@ export default function App() {
       socket.onerror = () => { if (!disposed) setNotice('Oscilação no servidor de sinalização. Tentando reconectar…') }
       socket.onmessage = ({ data }) => {
         let message; try { message = JSON.parse(data) } catch { return }
-        if (message.type === 'welcome') { setSelfId(message.id); setIsAdmin(['admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName) }
-        else if (message.type === 'users') setUsers(message.users)
-        else if (message.type === 'watch-request') shareWith(message.from)
+        if (message.type === 'welcome') { setSelfId(message.id); setModerationRole(message.role); setIsAdmin(['owner', 'admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName) }
+        else if (message.type === 'users') {
+          const nextIds = new Set(message.users.map((user) => user.id))
+          if (knownUsersRef.current && message.users.some((user) => user.id !== selfId && !knownUsersRef.current.has(user.id))) playChime('join')
+          knownUsersRef.current = nextIds
+          setUsers(message.users)
+        }
+        else if (message.type === 'watch-request') { if (localStreamRef.current) playChime('viewer'); shareWith(message.from) }
         else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); handleSignal(message) }
         else if (message.type === 'restart-request') pcsRef.current.get(message.connectionId)?.restart?.()
         else if (message.type === 'stop') closeConnection(message.connectionId, false)
@@ -291,7 +321,7 @@ export default function App() {
       }
     }
     connect()
-    return () => { disposed = true; clearTimeout(reconnectTimer); clearInterval(heartbeatTimer); socketRef.current?.close(); socketRef.current = null; closeAll() }
+    return () => { disposed = true; clearTimeout(reconnectTimer); clearInterval(heartbeatTimer); socketRef.current?.close(); socketRef.current = null; knownUsersRef.current = null; closeAll() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joined])
 
@@ -363,7 +393,7 @@ export default function App() {
       setCreatingRoom(false); setNewRoomName(''); await loadRooms(); await joinRoom(result.room, newRoomPassword); setNewRoomPassword('')
     } catch (error) { setAccessError(error.message); setJoining(false) }
   }
-  const leaveRoom = () => { stopSharing(false); socketRef.current?.close(); setAccessSession(''); setRoomName(''); setJoined(false); setUsers([]); setRemoteScreens({}); setNotice('Você saiu da sala.') }
+  const leaveRoom = () => { stopSharing(false); socketRef.current?.close(); knownUsersRef.current = null; setAccessSession(''); setRoomName(''); setJoined(false); setUsers([]); setRemoteScreens({}); setNotice('Você saiu da sala.') }
   const logoutSite = () => { leaveRoom(); localStorage.removeItem('screen-share-site-session'); setSiteSession(''); setSiteRole('member'); setAccessError('') }
 
   const getCapture = async () => {
@@ -429,7 +459,7 @@ export default function App() {
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
     <label className="quality-toggle" htmlFor="quality-toggle"><SlidersHorizontal size={16} /><span>Configurar transmissão</span></label>
     <div className="workspace multi-workspace">
-      <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length + 1}</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Compartilhe o nome e a senha desta sala com seus amigos.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions"><button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>{isAdmin && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>
+      <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length + 1}</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Compartilhe o nome e a senha desta sala com seus amigos.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions"><button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>{isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>
       <section className="panel stage multi-stage"><div className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>
       <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><label>FPS preferido</label><div className="segmented three">{[30, 60, 120].map((value) => <button type="button" className={fps === value ? 'selected' : ''} key={value} onClick={() => setFps(value)}>{value}</button>)}</div><p className="hint">120 FPS é uma preferência. O navegador, tela e GPU determinam o valor efetivo.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p><label>Bitrate por espectador</label><div className="quality-list">{Object.keys(bitrateLabels).map((key) => <button type="button" className={quality === key ? 'selected' : ''} key={key} onClick={() => setQuality(key)}><span>{bitrateLabels[key]}</span><small>{key === 'low' ? '2,5 Mbps' : key === 'medium' ? '8 Mbps' : key === 'high' ? '14 Mbps' : 'defina abaixo'}</small></button>)}</div>{quality === 'custom' && <label className="custom">Mbps<input type="number" min="0.5" max="100" step="0.5" value={customMbps} onChange={(event) => setCustomMbps(Math.min(100, Math.max(.5, Number(event.target.value))))} /></label>}</fieldset>{!localStreamRef.current && <button className="start-broadcast" onClick={startBroadcast}><Radio size={17} />Iniciar transmissão</button>}<div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
     </div>

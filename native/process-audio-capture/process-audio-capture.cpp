@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <atomic>
+#include <cstdio>
 
 using Microsoft::WRL::ComPtr;
 

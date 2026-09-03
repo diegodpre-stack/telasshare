@@ -156,7 +156,7 @@ function SelfPreview({ stream, routeLabel, outboundFpsLabel, onClose }) {
     return () => { disposed = true; if (callbackId) video.cancelVideoFrameCallback?.(callbackId) }
   }, [settings.frameRate, stream])
   const goFullscreen = () => videoRef.current?.parentElement?.requestFullscreen?.()
-  const fpsLabel = outboundFpsLabel || (actualFps ? `~${actualFps} FPS capturados` : 'medindo FPS')
+  const fpsLabel = [Number.isFinite(actualFps) ? `~${actualFps} FPS na prévia local` : 'medindo prévia local', outboundFpsLabel].filter(Boolean).join(' · ')
   return <div className="modal-backdrop"><section className="self-preview-modal" role="dialog" aria-modal="true" aria-labelledby="self-preview-title"><div className="screen-card-head"><div><i /><strong id="self-preview-title">Prévia da sua transmissão</strong><span>{settings.width && settings.height ? `${settings.width}×${settings.height}` : 'resolução automática'} · {fpsLabel} · {routeLabel}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Fechar prévia" onClick={onClose}><X size={16} /></button></div></div><div className="self-preview-video" onDoubleClick={goFullscreen}><video ref={videoRef} autoPlay playsInline muted /></div><p>{outboundFpsLabel ? 'FPS realmente enviado aos espectadores pela conexão WebRTC.' : 'FPS medido na captura local; ainda não há espectador para medir o envio.'} A rota é calculada separadamente para cada espectador.</p></section></div>
 }
 
@@ -276,20 +276,16 @@ export default function App() {
   }, [closeConnection, send])
 
   const startStats = useCallback((connectionId, pc) => {
-    let lastDecoded = -1
-    let stalledPolls = 0
-    let lastRecovery = 0
     let previousBytes = null
     let previousAt = null
     const timer = setInterval(async () => {
       try {
-        let measured = null; let decoded = null; let pair = null; let receivedMbps = null; let packetLoss = null; const stats = await pc.getStats()
+        let measured = null; let pair = null; let receivedMbps = null; let packetLoss = null; const stats = await pc.getStats()
         stats.forEach((report) => {
           if (report.type === 'transport' && report.selectedCandidatePairId) pair = stats.get(report.selectedCandidatePairId)
           if (!pair && report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) pair = report
           if (report.type === 'inbound-rtp' && report.kind === 'video') {
             if (Number.isFinite(report.framesPerSecond)) measured = report.framesPerSecond
-            if (Number.isFinite(report.framesDecoded)) decoded = report.framesDecoded
             const received = Math.max(0, Number(report.packetsReceived) || 0); const lost = Math.max(0, Number(report.packetsLost) || 0)
             if (received + lost > 0) packetLoss = Math.round((lost / (received + lost)) * 1000) / 10
             if (Number.isFinite(report.bytesReceived) && previousAt !== null && report.timestamp > previousAt) receivedMbps = Math.round(((report.bytesReceived - previousBytes) * 8 / (report.timestamp - previousAt) / 1000) * 10) / 10
@@ -301,14 +297,11 @@ export default function App() {
         const protocol = String(local?.protocol || remote?.protocol || '').toUpperCase()
         const rttMs = Number.isFinite(pair?.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : null
         setRemoteScreens((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], ...(Number.isFinite(measured) ? { fps: Math.round(measured) } : {}), route, protocol, rttMs, receivedMbps, packetLoss } } : current)
-        if (decoded !== null && ['connected', 'completed'].includes(pc.iceConnectionState)) {
-          stalledPolls = decoded === lastDecoded ? stalledPolls + 1 : 0; lastDecoded = decoded
-          if (stalledPolls >= 5 && Date.now() - lastRecovery > 30_000) { const entry = pcsRef.current.get(connectionId); if (entry) send({ type: 'restart-request', to: entry.peerId, connectionId }); lastRecovery = Date.now(); stalledPolls = 0 }
-        }
+        // Static content can produce no frames; ICE state handles actual connectivity failures.
       } catch { /* optional browser statistics */ }
     }, 1000)
     statsRef.current.set(connectionId, timer)
-  }, [send])
+  }, [])
 
   const startRouteStats = (connectionId, pc) => {
     let previousFrames = null; let previousBytes = null; let previousAt = null
@@ -371,6 +364,7 @@ export default function App() {
       if (message.description) {
         if (message.mode === 'turn' && entry.mode === 'auto') { entry.mode = 'turn'; entry.pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'relay' }) }
         await entry.pc.setRemoteDescription(message.description)
+        if (message.description.type === 'answer') { entry.restarting = false; await entry.configureSender?.() }
         for (const candidate of entry.pendingCandidates.splice(0)) await entry.pc.addIceCandidate(candidate)
         if (message.description.type === 'offer') { const answer = await entry.pc.createAnswer(); await entry.pc.setLocalDescription(answer); send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription }) }
       } else if (message.candidate) {
@@ -515,6 +509,7 @@ export default function App() {
     } else stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: false })
     if (shareAudio && !stream.getAudioTracks().length) await attachDesktopWindowAudio(stream, (reason) => { setAudioStatus('unavailable'); setNotice(`O áudio isolado da janela falhou (${reason || 'erro desconhecido'}). O vídeo continua sem áudio.`) })
     localStreamRef.current = stream
+    try { stream.getVideoTracks()[0].contentHint = 'motion' } catch { /* optional capture hint */ }
     const audioTrack = stream.getAudioTracks()[0]
     setAudioStatus(audioTrack ? 'on' : shareAudio ? 'unavailable' : 'off')
     if (audioTrack) audioTrack.onended = () => setAudioStatus('unavailable')
@@ -534,7 +529,20 @@ export default function App() {
       const stream = localStreamRef.current; if (!stream) return
       const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter', mode); const videoTrack = stream.getVideoTracks()[0]
       const sender = entry.pc.addTrack(videoTrack, stream); const maxBitrate = quality === 'custom' ? Math.round(customMbps * 1_000_000) : bitratePresets[quality]
-      try { const parameters = sender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = maxBitrate; parameters.encodings[0].maxFramerate = fps; await sender.setParameters(parameters) } catch { /* best effort */ }
+      const configureSender = async () => {
+        const parameters = sender.getParameters()
+        if (!parameters.encodings?.length) return
+        for (const encoding of parameters.encodings) { encoding.maxBitrate = maxBitrate; encoding.maxFramerate = fps }
+        parameters.degradationPreference = 'maintain-framerate'
+        try { await sender.setParameters(parameters) }
+        catch {
+          const fallback = sender.getParameters()
+          for (const encoding of fallback.encodings || []) { encoding.maxBitrate = maxBitrate; encoding.maxFramerate = fps }
+          try { await sender.setParameters(fallback) } catch { setNotice('Este navegador não aceitou os limites de envio; usando adaptação padrão.') }
+        }
+      }
+      entry.configureSender = configureSender
+      await configureSender()
       const audioTrack = stream.getAudioTracks()[0]
       if (audioTrack) {
         const audioSender = entry.pc.addTrack(audioTrack, stream)

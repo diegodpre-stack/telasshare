@@ -124,6 +124,7 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
 })
 
 const turnConfiguration = () => ({
+  enabled: process.env.TURN_ENABLED === 'true',
   keyId: process.env.CLOUDFLARE_TURN_KEY_ID,
   credentialToken: process.env.CLOUDFLARE_TURN_API_TOKEN,
   accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
@@ -170,7 +171,9 @@ const authenticateRoomRequest = (req, res) => {
 app.get('/api/turn-status', async (req, res) => {
   if (!authenticateRoomRequest(req, res)) return
   res.set('Cache-Control', 'no-store')
-  const status = await readTurnUsage(turnConfiguration())
+  const configuration = turnConfiguration()
+  if (!configuration.enabled) return res.json({ turnEnabled: false, blocked: true, reason: 'turn-disabled' })
+  const status = await readTurnUsage(configuration)
   res.json({ turnEnabled: status.enabled && !status.blocked, blocked: status.blocked, reason: status.reason, usedBytes: status.usedBytes, limitBytes: status.limitBytes })
 })
 
@@ -180,6 +183,7 @@ app.get('/api/ice-servers', async (req, res) => {
   res.set('Cache-Control', 'no-store')
   const fallback = [{ urls: ['stun:stun.l.google.com:19302'] }]
   const configuration = turnConfiguration()
+  if (!configuration.enabled) return res.json({ iceServers: fallback, turnEnabled: false, reason: 'turn-disabled' })
   if (!configuration.keyId || !configuration.credentialToken) return res.json({ iceServers: fallback, turnEnabled: false, reason: 'turn-not-configured' })
   const usage = await readTurnUsage(configuration)
   if (!usage.enabled || usage.blocked) return res.json({ iceServers: fallback, turnEnabled: false, blocked: usage.blocked, reason: usage.reason })

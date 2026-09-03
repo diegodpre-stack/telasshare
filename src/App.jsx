@@ -27,11 +27,18 @@ async function attachDesktopWindowAudio(stream, onError) {
   let current = null
   let offset = 0
   let closed = false
+  let pendingByte = null
+  let pendingSample = null
   const unsubscribeData = bridge.onWindowAudioData((value) => {
     if (closed) return
-    const bytes = value?.data ? Uint8Array.from(value.data) : new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength)
+    let bytes = value?.data ? Uint8Array.from(value.data) : new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength)
+    if (pendingByte !== null) { const joined = new Uint8Array(bytes.length + 1); joined[0] = pendingByte; joined.set(bytes, 1); bytes = joined; pendingByte = null }
+    if (bytes.length % 2) { pendingByte = bytes[bytes.length - 1]; bytes = bytes.subarray(0, bytes.length - 1) }
     const copy = bytes.slice()
-    queue.push(new Int16Array(copy.buffer, copy.byteOffset, Math.floor(copy.byteLength / 2)))
+    let samples = new Int16Array(copy.buffer, copy.byteOffset, copy.byteLength / 2)
+    if (pendingSample !== null) { const joined = new Int16Array(samples.length + 1); joined[0] = pendingSample; joined.set(samples, 1); samples = joined; pendingSample = null }
+    if (samples.length % 2) { pendingSample = samples[samples.length - 1]; samples = samples.subarray(0, samples.length - 1) }
+    if (samples.length) queue.push(samples)
     if (queue.length > 40) queue.splice(0, queue.length - 40)
   })
   const cleanup = () => {

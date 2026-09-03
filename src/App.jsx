@@ -295,6 +295,27 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joined])
 
+  useEffect(() => {
+    if (!joined || !accessSession) return
+    let disposed = false
+    const refreshTurnAccess = async () => {
+      try {
+        const response = await fetch('/api/ice-servers', { headers: { authorization: `Bearer ${accessSession}` } })
+        const result = await response.json()
+        if (disposed || !response.ok || !Array.isArray(result.iceServers)) return
+        const hadTurn = iceServersRef.current.some((entry) => JSON.stringify(entry.urls).includes('turn:') || JSON.stringify(entry.urls).includes('turns:'))
+        iceServersRef.current = result.iceServers.length ? result.iceServers : staticIceServers()
+        if (hadTurn && !result.turnEnabled) {
+          for (const id of [...pcsRef.current.keys()]) closeConnection(id, true)
+          setNotice(result.reason === 'monthly-limit' ? 'O limite mensal de segurança do servidor auxiliar foi atingido. O P2P continua disponível.' : 'O servidor auxiliar foi desativado por segurança. O P2P continua disponível.')
+        }
+      } catch { /* a ausência de resposta nunca habilita TURN */ }
+    }
+    refreshTurnAccess()
+    const timer = setInterval(refreshTurnAccess, 5 * 60 * 1000)
+    return () => { disposed = true; clearInterval(timer) }
+  }, [accessSession, closeConnection, joined])
+
   const loginSite = async (event) => {
     event.preventDefault(); const cleanName = name.trim()
     if (cleanName.length < 2) return setAccessError('Use um nome com pelo menos 2 caracteres.')

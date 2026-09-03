@@ -26,3 +26,9 @@ services:
         sync: false
       - key: CLOUDFLARE_TURN_API_TOKEN
         sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_ANALYTICS_API_TOKEN
+        sync: false
+      - key: TURN_MONTHLY_LIMIT_GB
+        value: 800

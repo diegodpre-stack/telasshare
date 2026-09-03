@@ -20,7 +20,10 @@ const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_
 const loginAttempts = new Map()
 const rooms = new Map()
 const ROOM_SESSION_MS = 30 * 24 * 60 * 60 * 1000
-const TURN_CREDENTIAL_TTL_SECONDS = 24 * 60 * 60
+const TURN_CREDENTIAL_TTL_SECONDS = 60 * 60
+const TURN_USAGE_CACHE_MS = 5 * 60 * 1000
+const TURN_DEFAULT_LIMIT_GB = 800
+let turnUsageCache = null
 const normalizeRoomName = (value) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 40) : ''
 const roomKey = (name) => name.toLocaleLowerCase('pt-BR')
 const hashPassword = (password, salt = crypto.randomBytes(16).toString('base64url')) => ({
@@ -119,22 +122,72 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
   res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: authenticated.role, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: authenticated.role, roomName: room.name })
 })
 
-app.get('/api/ice-servers', async (req, res) => {
+const turnConfiguration = () => ({
+  keyId: process.env.CLOUDFLARE_TURN_KEY_ID,
+  credentialToken: process.env.CLOUDFLARE_TURN_API_TOKEN,
+  accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
+  analyticsToken: process.env.CLOUDFLARE_ANALYTICS_API_TOKEN,
+  limitBytes: Math.max(1, Number(process.env.TURN_MONTHLY_LIMIT_GB || TURN_DEFAULT_LIMIT_GB)) * 1_000_000_000,
+})
+const readTurnUsage = async ({ keyId, accountId, analyticsToken, limitBytes }) => {
+  if (!keyId || !accountId || !analyticsToken) return { enabled: false, blocked: true, reason: 'protection-not-configured', usedBytes: 0, limitBytes }
+  if (turnUsageCache && Date.now() - turnUsageCache.checkedAt < TURN_USAGE_CACHE_MS) return turnUsageCache
+  const now = new Date()
+  const dateFrom = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`
+  const dateTo = now.toISOString().slice(0, 10)
+  const query = `query TurnMonthlyUsage($accountId: String!, $keyId: String!, $dateFrom: Date!, $dateTo: Date!) {
+    viewer { accounts(filter: { accountTag: $accountId }) { callsTurnUsageAdaptiveGroups(
+      limit: 1
+      filter: { keyId: $keyId, date_geq: $dateFrom, date_leq: $dateTo }
+    ) { sum { egressBytes } } } }
+  }`
+  try {
+    const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${analyticsToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ query, variables: { accountId, keyId, dateFrom, dateTo } }),
+      signal: AbortSignal.timeout(8_000),
+    })
+    const result = await response.json()
+    const groups = result?.data?.viewer?.accounts?.[0]?.callsTurnUsageAdaptiveGroups
+    if (!response.ok || result?.errors?.length || !Array.isArray(groups)) throw new Error(result?.errors?.[0]?.message || 'TURN analytics unavailable')
+    const usedBytes = groups.reduce((total, group) => total + Math.max(0, Number(group?.sum?.egressBytes) || 0), 0)
+    turnUsageCache = { enabled: true, blocked: usedBytes >= limitBytes, reason: usedBytes >= limitBytes ? 'monthly-limit' : null, usedBytes, limitBytes, checkedAt: Date.now() }
+    return turnUsageCache
+  } catch (error) {
+    console.error('Could not verify TURN usage; failing closed:', error.message)
+    return { enabled: false, blocked: true, reason: 'usage-check-failed', usedBytes: 0, limitBytes, checkedAt: Date.now() }
+  }
+}
+const authenticateRoomRequest = (req, res) => {
   const authenticated = readBearerSession(req, 'room')
   const room = authenticated ? rooms.get(authenticated.roomKey) : null
-  if (!authenticated || !room || room.id !== authenticated.roomId) return res.status(401).json({ error: 'Entre em uma sala novamente.' })
+  if (!authenticated || !room || room.id !== authenticated.roomId) { res.status(401).json({ error: 'Entre em uma sala novamente.' }); return null }
+  return authenticated
+}
+
+app.get('/api/turn-status', async (req, res) => {
+  if (!authenticateRoomRequest(req, res)) return
+  res.set('Cache-Control', 'no-store')
+  const status = await readTurnUsage(turnConfiguration())
+  res.json({ turnEnabled: status.enabled && !status.blocked, blocked: status.blocked, reason: status.reason, usedBytes: status.usedBytes, limitBytes: status.limitBytes })
+})
+
+app.get('/api/ice-servers', async (req, res) => {
+  if (!authenticateRoomRequest(req, res)) return
 
   res.set('Cache-Control', 'no-store')
   const fallback = [{ urls: ['stun:stun.l.google.com:19302'] }]
-  const turnKeyId = process.env.CLOUDFLARE_TURN_KEY_ID
-  const turnApiToken = process.env.CLOUDFLARE_TURN_API_TOKEN
-  if (!turnKeyId || !turnApiToken) return res.json({ iceServers: fallback, turnEnabled: false })
+  const configuration = turnConfiguration()
+  if (!configuration.keyId || !configuration.credentialToken) return res.json({ iceServers: fallback, turnEnabled: false, reason: 'turn-not-configured' })
+  const usage = await readTurnUsage(configuration)
+  if (!usage.enabled || usage.blocked) return res.json({ iceServers: fallback, turnEnabled: false, blocked: usage.blocked, reason: usage.reason })
 
   try {
-    const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(turnKeyId)}/credentials/generate-ice-servers`, {
+    const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(configuration.keyId)}/credentials/generate-ice-servers`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${turnApiToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ ttl: TURN_CREDENTIAL_TTL_SECONDS }),
+      headers: { authorization: `Bearer ${configuration.credentialToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ ttl: TURN_CREDENTIAL_TTL_SECONDS, customIdentifier: 'entretelas' }),
       signal: AbortSignal.timeout(8_000),
     })
     const result = await response.json()

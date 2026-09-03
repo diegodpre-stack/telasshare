@@ -95,14 +95,19 @@ Defina `ADMIN_PASSWORD_1` até `ADMIN_PASSWORD_4` no Render. A primeira senha é
 1. Publique o frontend com HTTPS e defina `VITE_SIGNAL_URL=wss://seu-dominio-de-sinalizacao` antes de `npm run build`.
 2. Publique o servidor Node em uma hospedagem que aceite WebSocket e configure `CLIENT_ORIGIN=https://seu-frontend`.
 3. Use HTTPS/WSS com certificado válido (`TLS_CERT_PATH` e `TLS_KEY_PATH` quando o TLS terminar no próprio Node; deixe vazios quando um proxy como Caddy/Nginx fizer a terminação TLS).
-4. Para usar o Cloudflare Realtime TURN como fallback, crie uma chave TURN no painel da Cloudflare e adicione estas duas variáveis secretas no backend/Render:
+4. Para usar o Cloudflare Realtime TURN como fallback protegido por limite mensal, crie uma chave TURN e um token de API com permissão de leitura `Account Analytics`. Adicione estas variáveis secretas no backend/Render:
 
 ```dotenv
 CLOUDFLARE_TURN_KEY_ID=id-da-chave-turn
 CLOUDFLARE_TURN_API_TOKEN=token-secreto-da-chave-turn
+CLOUDFLARE_ACCOUNT_ID=id-da-conta-cloudflare
+CLOUDFLARE_ANALYTICS_API_TOKEN=token-com-permissao-account-analytics
+TURN_MONTHLY_LIMIT_GB=800
 ```
 
-O backend solicita credenciais com validade de 24 horas somente depois que o usuário entra em uma sala autenticada. A chave permanente nunca é enviada ao navegador. O WebRTC mantém `iceTransportPolicy: all`: tenta conexão direta P2P e usa o TURN somente quando necessário. Se as variáveis não existirem ou a Cloudflare estiver temporariamente indisponível, o sistema continua usando STUN/P2P.
+Antes de fornecer qualquer credencial, o backend consulta na própria Cloudflare a saída mensal da chave TURN. Ao atingir 800 GB, ele bloqueia novas credenciais; os clientes também verificam o estado a cada cinco minutos e encerram conexões auxiliares ativas. A margem de 200 GB cobre atraso de métricas e tráfego ainda em andamento. Se a consulta falhar ou alguma variável de proteção estiver ausente, o sistema falha de forma segura e fornece somente STUN/P2P. O limite é uma proteção conservadora do aplicativo, mas a medição da Cloudflare não deve ser tratada como um teto financeiro contratual absoluto.
+
+As credenciais temporárias duram uma hora e a chave permanente nunca é enviada ao navegador. O WebRTC mantém `iceTransportPolicy: all`: tenta conexão direta P2P e usa o TURN somente quando necessário. P2P permanece disponível mesmo quando o TURN é bloqueado.
 
 As variáveis `VITE_TURN_*` permanecem disponíveis exclusivamente para testes locais com outro provedor. Elas ficam embutidas no frontend e nunca devem receber uma chave permanente de produção.
 

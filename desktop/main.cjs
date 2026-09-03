@@ -9,6 +9,7 @@ const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow
 let processAudioCapture = null
 let updateWindow = null
+let postponedUpdateVersion = null
 
 const audioHelperPath = () => app.isPackaged
   ? path.join(process.resourcesPath, 'native', 'process-audio-capture.exe')
@@ -156,6 +157,7 @@ function createWindow() {
 
 function showUpdateReady(updateInfo) {
   if (!mainWindow || mainWindow.isDestroyed()) return
+  if (postponedUpdateVersion === updateInfo?.version) return
   if (updateWindow && !updateWindow.isDestroyed()) { updateWindow.focus(); return }
   const version = escapeHtml(updateInfo?.version || 'mais recente')
   updateWindow = new BrowserWindow({
@@ -181,6 +183,7 @@ function showUpdateReady(updateInfo) {
       updateWindow?.destroy(); updateWindow = null
       autoUpdater.quitAndInstall({ isSilent: true, isForceRunAfter: true })
     } else {
+      postponedUpdateVersion = updateInfo?.version || 'latest'
       updateWindow?.destroy(); updateWindow = null
     }
   })
@@ -191,11 +194,25 @@ function showUpdateReady(updateInfo) {
 
 function configureUpdates() {
   if (!app.isPackaged || process.env.PORTABLE_EXECUTABLE_FILE) return
+  const CHECK_INTERVAL_MS = 15 * 60 * 1000
+  const FOCUS_THROTTLE_MS = 5 * 60 * 1000
+  let lastCheck = 0
+  let checking = false
+  const checkForUpdates = async (force = false) => {
+    if (checking || (!force && Date.now() - lastCheck < FOCUS_THROTTLE_MS)) return
+    checking = true
+    lastCheck = Date.now()
+    try { await autoUpdater.checkForUpdates() } catch { /* retry silently on the next interval */ }
+    finally { checking = false }
+  }
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = false
   autoUpdater.disableDifferentialDownload = false
   autoUpdater.on('update-downloaded', showUpdateReady)
-  autoUpdater.checkForUpdates().catch(() => {})
+  checkForUpdates(true)
+  const timer = setInterval(() => checkForUpdates(true), CHECK_INTERVAL_MS)
+  mainWindow.on('focus', () => checkForUpdates(false))
+  mainWindow.on('closed', () => clearInterval(timer))
 }
 
 if (!app.requestSingleInstanceLock()) app.quit()

@@ -34,4 +34,4 @@ services:
       - key: TURN_MONTHLY_LIMIT_GB
         value: 800
       - key: TURN_ENABLED
-        value: false
+        value: true

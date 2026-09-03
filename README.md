@@ -108,7 +108,7 @@ TURN_MONTHLY_LIMIT_GB=800
 TURN_ENABLED=true
 ```
 
-O fallback pode ser desligado sem remover nenhuma credencial definindo `TURN_ENABLED=false` (ou removendo a variável). Para reativá-lo, basta voltar o valor para `true` e fazer um novo deploy. Com ele desligado, as transmissões usam somente STUN/P2P.
+O fallback pode ser desligado sem remover nenhuma credencial definindo `TURN_ENABLED=false` (ou removendo a variável). Para reativá-lo, basta voltar o valor para `true` e fazer um novo deploy. Com ele desligado, as transmissões usam somente STUN/P2P. A prévia do transmissor mostra protocolo, latência, banda estimada e eventual motivo de limitação para ajudar a comparar as rotas.
 
 Antes de fornecer qualquer credencial, o backend consulta na própria Cloudflare a saída mensal da chave TURN. Ao atingir 800 GB, ele bloqueia novas credenciais; os clientes também verificam o estado a cada cinco minutos e encerram conexões auxiliares ativas. A margem de 200 GB cobre atraso de métricas e tráfego ainda em andamento. Se a consulta falhar ou alguma variável de proteção estiver ausente, o sistema falha de forma segura e fornece somente STUN/P2P. O limite é uma proteção conservadora do aplicativo, mas a medição da Cloudflare não deve ser tratada como um teto financeiro contratual absoluto.
 

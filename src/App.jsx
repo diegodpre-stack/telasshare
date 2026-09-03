@@ -125,8 +125,9 @@ function RemoteScreen({ screen, name, size, onStop }) {
   }, [play, screen.stream])
   const enableAudio = () => { const video = videoRef.current; if (!video) return; video.muted = false; setMuted(false); play() }
   const goFullscreen = () => { const frame = videoRef.current?.parentElement; return frame?.requestFullscreen?.() || videoRef.current?.webkitEnterFullscreen?.() }
+  const connectionDetails = [screen.route === 'turn' ? 'TURN' : screen.route === 'p2p' ? 'P2P' : '', screen.protocol, Number.isFinite(screen.rttMs) ? `${screen.rttMs} ms` : '', Number.isFinite(screen.receivedMbps) ? `${screen.receivedMbps} Mbps` : '', Number.isFinite(screen.packetLoss) ? `${screen.packetLoss}% perda` : ''].filter(Boolean).join(' · ')
   return <article className={`screen-card size-${size}`}>
-    <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{screen.fps ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
+    <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{Number.isFinite(screen.fps) ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}{connectionDetails ? ` · ${connectionDetails}` : ''}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
     <div className="remote-frame" onDoubleClick={goFullscreen}><video ref={videoRef} autoPlay playsInline />{!screen.stream && <div className="video-placeholder overlay"><div className="spinner" /><strong>Aguardando a tela</strong></div>}{screen.hasAudio && audioBlocked && <button className="audio-unlock" onClick={enableAudio}><Volume2 size={16} />Ativar som</button>}</div>
     {screen.hasAudio && <div className="screen-audio"><button title={muted ? 'Ativar som' : 'Silenciar'} onClick={() => setMuted((current) => !current)}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0) }} aria-label={`Volume da tela de ${name}`} /><span>{Math.round((muted ? 0 : volume) * 100)}%</span></div>}
   </article>
@@ -253,17 +254,34 @@ export default function App() {
     let lastDecoded = -1
     let stalledPolls = 0
     let lastRecovery = 0
+    let previousBytes = null
+    let previousAt = null
     const timer = setInterval(async () => {
       try {
-        let measured = null; let decoded = null; const stats = await pc.getStats()
-        stats.forEach((report) => { if (report.type === 'inbound-rtp' && report.kind === 'video') { if (report.framesPerSecond) measured = report.framesPerSecond; if (Number.isFinite(report.framesDecoded)) decoded = report.framesDecoded } })
-        if (measured) setRemoteScreens((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], fps: Math.round(measured) } } : current)
+        let measured = null; let decoded = null; let pair = null; let receivedMbps = null; let packetLoss = null; const stats = await pc.getStats()
+        stats.forEach((report) => {
+          if (report.type === 'transport' && report.selectedCandidatePairId) pair = stats.get(report.selectedCandidatePairId)
+          if (!pair && report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) pair = report
+          if (report.type === 'inbound-rtp' && report.kind === 'video') {
+            if (Number.isFinite(report.framesPerSecond)) measured = report.framesPerSecond
+            if (Number.isFinite(report.framesDecoded)) decoded = report.framesDecoded
+            const received = Math.max(0, Number(report.packetsReceived) || 0); const lost = Math.max(0, Number(report.packetsLost) || 0)
+            if (received + lost > 0) packetLoss = Math.round((lost / (received + lost)) * 1000) / 10
+            if (Number.isFinite(report.bytesReceived) && previousAt !== null && report.timestamp > previousAt) receivedMbps = Math.round(((report.bytesReceived - previousBytes) * 8 / (report.timestamp - previousAt) / 1000) * 10) / 10
+            if (Number.isFinite(report.bytesReceived)) { previousBytes = report.bytesReceived; previousAt = report.timestamp }
+          }
+        })
+        const local = pair ? stats.get(pair.localCandidateId) : null; const remote = pair ? stats.get(pair.remoteCandidateId) : null
+        const route = pair ? local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'turn' : 'p2p' : null
+        const protocol = String(local?.protocol || remote?.protocol || '').toUpperCase()
+        const rttMs = Number.isFinite(pair?.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : null
+        setRemoteScreens((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], ...(Number.isFinite(measured) ? { fps: Math.round(measured) } : {}), route, protocol, rttMs, receivedMbps, packetLoss } } : current)
         if (decoded !== null && ['connected', 'completed'].includes(pc.iceConnectionState)) {
           stalledPolls = decoded === lastDecoded ? stalledPolls + 1 : 0; lastDecoded = decoded
           if (stalledPolls >= 5 && Date.now() - lastRecovery > 30_000) { const entry = pcsRef.current.get(connectionId); if (entry) send({ type: 'restart-request', to: entry.peerId, connectionId }); lastRecovery = Date.now(); stalledPolls = 0 }
         }
       } catch { /* optional browser statistics */ }
-    }, 3000)
+    }, 1000)
     statsRef.current.set(connectionId, timer)
   }, [send])
 

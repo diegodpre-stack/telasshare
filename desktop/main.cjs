@@ -5,6 +5,11 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const APP_URL = 'https://telasshare.onrender.com'
+
+// Chromium hides host candidates behind .local mDNS names. A browser resolves its own names, but the
+// packaged app does not, so every host candidate is dead on arrival and only the relay path survives.
+app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns')
+app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default')
 const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow
 let processAudioCapture = null
@@ -122,7 +127,9 @@ function configureSession() {
     callback(isTrustedUrl(webContents.getURL()) && isTrustedUrl(details.requestingUrl || webContents.getURL()) && allowed.includes(permission))
   })
   appSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
-    return isTrustedUrl(webContents?.getURL?.() || '') && isTrustedUrl(requestingOrigin) && allowed.includes(permission)
+    // Chromium omits the origin on some internal checks; falling back keeps WebRTC out of restricted mode.
+    const origin = requestingOrigin && requestingOrigin !== 'null' ? requestingOrigin : webContents?.getURL?.() || ''
+    return isTrustedUrl(webContents?.getURL?.() || '') && isTrustedUrl(origin) && allowed.includes(permission)
   })
 }
 

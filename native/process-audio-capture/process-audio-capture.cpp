@@ -17,7 +17,7 @@ BOOL WINAPI OnConsoleSignal(DWORD) {
     return TRUE;
 }
 
-class ActivationHandler final : public IActivateAudioInterfaceCompletionHandler {
+class ActivationHandler final : public IActivateAudioInterfaceCompletionHandler, public IAgileObject {
 public:
     ActivationHandler() : event_(CreateEventW(nullptr, FALSE, FALSE, nullptr)) {}
     ~ActivationHandler() { if (event_) CloseHandle(event_); }
@@ -26,6 +26,11 @@ public:
         if (!value) return E_POINTER;
         if (iid == __uuidof(IUnknown) || iid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
             *value = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (iid == __uuidof(IAgileObject)) {
+            *value = static_cast<IAgileObject*>(this);
             AddRef();
             return S_OK;
         }

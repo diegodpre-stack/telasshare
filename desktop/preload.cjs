@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', Object.freeze({
     return () => ipcRenderer.removeListener('window-audio-data', listener)
   },
   onWindowAudioError: (callback) => {
-    const listener = () => callback()
+    const listener = (_event, reason) => callback(reason)
     ipcRenderer.on('window-audio-error', listener)
     return () => ipcRenderer.removeListener('window-audio-error', listener)
   },

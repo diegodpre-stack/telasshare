@@ -35,7 +35,7 @@ function startProcessAudioCapture(source) {
   })
   capture.on('exit', (code) => {
     if (processAudioCapture === capture) processAudioCapture = null
-    if (code && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window-audio-error')
+    if (code && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window-audio-error', `native-exit-${code}`)
   })
   return true
 }

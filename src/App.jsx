@@ -46,7 +46,7 @@ async function attachDesktopWindowAudio(stream, onError) {
     closed = true
     unsubscribeData?.(); unsubscribeError?.(); processor.disconnect(); context.close().catch(() => {}); bridge.stopWindowAudio?.()
   }
-  const unsubscribeError = bridge.onWindowAudioError(() => { onError?.(); cleanup() })
+  const unsubscribeError = bridge.onWindowAudioError((reason) => { onError?.(reason); cleanup() })
   processor.onaudioprocess = (event) => {
     const left = event.outputBuffer.getChannelData(0)
     const right = event.outputBuffer.getChannelData(1)
@@ -85,12 +85,21 @@ function RemoteScreen({ screen, name, size, onStop }) {
   const [muted, setMuted] = useState(false)
   const [volume, setVolume] = useState(1)
   const [audioBlocked, setAudioBlocked] = useState(false)
-  const play = useCallback(() => {
+  const play = useCallback(async () => {
     const video = videoRef.current; if (!video) return
-    video.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(!video.muted))
+    try { await video.play(); setAudioBlocked(false) }
+    catch {
+      video.muted = true; setMuted(true)
+      try { await video.play(); setAudioBlocked(true) } catch { setAudioBlocked(true) }
+    }
   }, [])
   useEffect(() => { const video = videoRef.current; if (!video) return; video.srcObject = screen.stream || null; if (screen.stream) play() }, [screen.stream, play])
   useEffect(() => { const video = videoRef.current; if (!video) return; video.muted = muted; video.volume = volume }, [muted, volume, screen.stream])
+  useEffect(() => {
+    const handleVisibility = () => { if (document.hidden) videoRef.current?.pause(); else if (screen.stream) play() }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [play, screen.stream])
   const enableAudio = () => { const video = videoRef.current; if (!video) return; video.muted = false; setMuted(false); play() }
   const goFullscreen = () => { const frame = videoRef.current?.parentElement; return frame?.requestFullscreen?.() || videoRef.current?.webkitEnterFullscreen?.() }
   return <article className={`screen-card size-${size}`}>
@@ -201,15 +210,22 @@ export default function App() {
   }, [closeConnection, send])
 
   const startStats = useCallback((connectionId, pc) => {
+    let lastDecoded = -1
+    let stalledPolls = 0
+    let lastRecovery = 0
     const timer = setInterval(async () => {
       try {
-        let measured = null; const stats = await pc.getStats()
-        stats.forEach((report) => { if (report.type === 'inbound-rtp' && report.kind === 'video' && report.framesPerSecond) measured = report.framesPerSecond })
+        let measured = null; let decoded = null; const stats = await pc.getStats()
+        stats.forEach((report) => { if (report.type === 'inbound-rtp' && report.kind === 'video') { if (report.framesPerSecond) measured = report.framesPerSecond; if (Number.isFinite(report.framesDecoded)) decoded = report.framesDecoded } })
         if (measured) setRemoteScreens((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], fps: Math.round(measured) } } : current)
+        if (decoded !== null && ['connected', 'completed'].includes(pc.iceConnectionState)) {
+          stalledPolls = decoded === lastDecoded ? stalledPolls + 1 : 0; lastDecoded = decoded
+          if (stalledPolls >= 5 && Date.now() - lastRecovery > 30_000) { const entry = pcsRef.current.get(connectionId); if (entry) send({ type: 'restart-request', to: entry.peerId, connectionId }); lastRecovery = Date.now(); stalledPolls = 0 }
+        }
       } catch { /* optional browser statistics */ }
-    }, 1500)
+    }, 3000)
     statsRef.current.set(connectionId, timer)
-  }, [])
+  }, [send])
 
   const handleSignal = useCallback(async (message) => {
     try {
@@ -218,7 +234,12 @@ export default function App() {
         if (message.description?.type !== 'offer') return
         entry = createPeer(message.connectionId, message.from, 'viewer')
         entry.pc.ontrack = ({ streams, track }) => {
-          setRemoteScreens((current) => ({ ...current, [message.connectionId]: { ...current[message.connectionId], peerId: message.from, waiting: false, stream: streams[0], hasAudio: track.kind === 'audio' || Boolean(current[message.connectionId]?.hasAudio) } }))
+          setRemoteScreens((current) => {
+            const existing = current[message.connectionId]
+            const stream = streams[0] || existing?.stream || new MediaStream()
+            if (!stream.getTracks().some((item) => item.id === track.id)) stream.addTrack(track)
+            return { ...current, [message.connectionId]: { ...existing, peerId: message.from, waiting: false, stream, hasAudio: track.kind === 'audio' || Boolean(existing?.hasAudio) } }
+          })
           if (track.kind === 'video') startStats(message.connectionId, entry.pc)
         }
         setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, waiting: false, stream: null, hasAudio: false } }))
@@ -337,7 +358,7 @@ export default function App() {
         stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: true })
       }
     } else stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: false })
-    if (shareAudio && !stream.getAudioTracks().length) await attachDesktopWindowAudio(stream, () => setAudioStatus('unavailable'))
+    if (shareAudio && !stream.getAudioTracks().length) await attachDesktopWindowAudio(stream, (reason) => { setAudioStatus('unavailable'); setNotice(`O áudio isolado da janela falhou (${reason || 'erro desconhecido'}). O vídeo continua sem áudio.`) })
     localStreamRef.current = stream
     const audioTrack = stream.getAudioTracks()[0]
     setAudioStatus(audioTrack ? 'on' : shareAudio ? 'unavailable' : 'off')

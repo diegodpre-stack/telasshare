@@ -155,6 +155,16 @@ function createWindow() {
   mainWindow.loadURL(APP_URL)
 }
 
+function scheduleRelaunchAfterUpdate(expectedVersion) {
+  if (process.platform !== 'win32') return
+  const executable = Buffer.from(process.execPath, 'utf8').toString('base64')
+  const version = Buffer.from(String(expectedVersion || ''), 'utf8').toString('base64')
+  const script = `$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${executable}'));$expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${version}'));Wait-Process -Id ${process.pid} -ErrorAction SilentlyContinue;Start-Sleep -Seconds 3;$deadline=(Get-Date).AddSeconds(90);while((Get-Date)-lt $deadline){if(Test-Path -LiteralPath $target){try{$installed=(Get-Item -LiteralPath $target).VersionInfo.ProductVersion;if((-not $expected) -or $installed.StartsWith($expected)){Start-Sleep -Seconds 2;break}}catch{}};Start-Sleep -Seconds 1};if(Test-Path -LiteralPath $target){Start-Process -FilePath $target}`
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  const helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], { detached: true, windowsHide: true, stdio: 'ignore' })
+  helper.unref()
+}
+
 function showUpdateReady(updateInfo) {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (postponedUpdateVersion === updateInfo?.version) return
@@ -181,6 +191,7 @@ function showUpdateReady(updateInfo) {
     const action = url.slice('entretelas-update:'.length)
     if (action === 'install') {
       updateWindow?.webContents.executeJavaScript('window.showInstalling()').catch(() => {})
+      scheduleRelaunchAfterUpdate(updateInfo?.version)
       setTimeout(() => autoUpdater.quitAndInstall(true, true), 1_800)
     } else {
       postponedUpdateVersion = updateInfo?.version || 'latest'

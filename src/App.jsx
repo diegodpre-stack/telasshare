@@ -76,7 +76,7 @@ const playChime = (kind) => {
   const start = context.currentTime
   const master = context.createGain()
   master.gain.setValueAtTime(0.0001, start)
-  master.gain.exponentialRampToValueAtTime(0.055, start + 0.015)
+  master.gain.exponentialRampToValueAtTime(0.09, start + 0.015)
   master.gain.exponentialRampToValueAtTime(0.0001, start + 0.42)
   master.connect(context.destination)
   notes.forEach((frequency, index) => {

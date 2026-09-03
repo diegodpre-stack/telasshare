@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell } = require('electron')
+const { app, BrowserWindow, desktopCapturer, ipcMain, session, shell } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
@@ -8,6 +8,7 @@ const APP_URL = 'https://telasshare.onrender.com'
 const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow
 let processAudioCapture = null
+let updateWindow = null
 
 const audioHelperPath = () => app.isPackaged
   ? path.join(process.resourcesPath, 'native', 'process-audio-capture.exe')
@@ -153,23 +154,48 @@ function createWindow() {
   mainWindow.loadURL(APP_URL)
 }
 
+function showUpdateReady(updateInfo) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (updateWindow && !updateWindow.isDestroyed()) { updateWindow.focus(); return }
+  const version = escapeHtml(updateInfo?.version || 'mais recente')
+  updateWindow = new BrowserWindow({
+    parent: mainWindow,
+    modal: true,
+    width: 520,
+    height: 390,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    show: false,
+    frame: false,
+    backgroundColor: '#07111f',
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  })
+  const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>
+    :root{font-family:Segoe UI,Arial,sans-serif;color:#e9f3fb;background:#07111f}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 50% -10%,#12413e 0,transparent 48%),#07111f}.card{width:100%;height:100%;padding:38px 42px 32px;display:flex;flex-direction:column;align-items:center;text-align:center;border:1px solid #1d3548}.icon{width:64px;height:64px;display:grid;place-items:center;border-radius:20px;background:linear-gradient(145deg,#52e5bb,#28aa8d);color:#052219;box-shadow:0 16px 45px #36d8ad33;font-size:31px;font-weight:800}.eyebrow{margin:20px 0 7px;color:#62e6c1;font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}h1{margin:0;font-size:25px}p{margin:12px auto 0;max-width:390px;color:#9bb0c2;font-size:13px;line-height:1.55}.version{color:#dceaf4;font-weight:700}.actions{margin-top:auto;width:100%;display:flex;gap:10px}.actions button{flex:1;padding:13px 16px;border-radius:12px;border:1px solid #2c4356;background:#132538;color:#b8c9d7;font-weight:750;font-size:13px}.actions .primary{border-color:#4de1b7;background:#4de1b7;color:#05251b}.hint{margin-top:13px;color:#688096;font-size:10px}</style></head><body><main class="card"><div class="icon">↻</div><div class="eyebrow">Atualização pronta</div><h1>Uma versão nova chegou</h1><p>A versão <span class="version">${version}</span> já foi baixada. O EntreTelas pode reiniciar e aplicar o pacote de atualização automaticamente.</p><div class="actions"><button id="later">Depois</button><button id="install" class="primary">Atualizar e reiniciar</button></div><div class="hint">Suas transmissões abertas serão encerradas durante a reinicialização.</div></main><script>const done=value=>location.href='entretelas-update:'+value;document.querySelector('#later').onclick=()=>done('later');document.querySelector('#install').onclick=()=>done('install');</script></body></html>`
+  updateWindow.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('entretelas-update:')) return
+    event.preventDefault()
+    const action = url.slice('entretelas-update:'.length)
+    if (action === 'install') {
+      updateWindow?.destroy(); updateWindow = null
+      autoUpdater.quitAndInstall({ isSilent: true, isForceRunAfter: true })
+    } else {
+      updateWindow?.destroy(); updateWindow = null
+    }
+  })
+  updateWindow.on('closed', () => { updateWindow = null })
+  updateWindow.once('ready-to-show', () => updateWindow?.show())
+  updateWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+}
+
 function configureUpdates() {
   if (!app.isPackaged || process.env.PORTABLE_EXECUTABLE_FILE) return
   autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
-  autoUpdater.on('update-downloaded', async () => {
-    const result = await dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      title: 'Atualização pronta',
-      message: 'Uma versão nova do EntreTelas foi baixada.',
-      detail: 'Reinicie agora para usar as mudanças mais recentes.',
-      buttons: ['Reiniciar e atualizar', 'Depois'],
-      defaultId: 0,
-      cancelId: 1,
-    })
-    if (result.response === 0) autoUpdater.quitAndInstall()
-  })
-  autoUpdater.checkForUpdatesAndNotify().catch(() => {})
+  autoUpdater.autoInstallOnAppQuit = false
+  autoUpdater.disableDifferentialDownload = false
+  autoUpdater.on('update-downloaded', showUpdateReady)
+  autoUpdater.checkForUpdates().catch(() => {})
 }
 
 if (!app.requestSingleInstanceLock()) app.quit()

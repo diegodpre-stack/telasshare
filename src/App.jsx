@@ -235,6 +235,12 @@ export default function App() {
     const directServers = iceServersRef.current.map((server) => ({ ...server, urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url) => /^stuns?:/.test(url)) })).filter((server) => server.urls.length)
     const pc = new RTCPeerConnection({ iceServers: mode === 'turn' ? iceServersRef.current : directServers, iceTransportPolicy: mode === 'turn' ? 'relay' : 'all' })
     const entry = { pc, peerId, role, mode, pendingCandidates: earlyCandidatesRef.current.get(connectionId) || [], disconnectTimer: null, restarting: false }; earlyCandidatesRef.current.delete(connectionId); pcsRef.current.set(connectionId, entry)
+    entry.iceDiagnostics = { gathered: 0, received: entry.pendingCandidates.length, applied: 0, rejected: 0, errors: [] }
+    pc.onicecandidateerror = (event) => {
+      // Never store candidate addresses, URLs, SDP, or error text (may contain IPs).
+      entry.iceDiagnostics.errors.push({ time: Date.now(), code: event.errorCode })
+      entry.iceDiagnostics.errors = entry.iceDiagnostics.errors.slice(-12)
+    }
     const failConnection = () => {
       const reason = pc.remoteDescription ? 'ice-timeout' : 'signaling-timeout'
       send({ type: 'stop', to: peerId, connectionId, reason })
@@ -247,10 +253,10 @@ export default function App() {
       try {
         pc.restartIce()
         const offer = await pc.createOffer({ iceRestart: true }); await pc.setLocalDescription(offer)
-        send({ type: 'signal', to: peerId, connectionId, mode: entry.mode, description: pc.localDescription })
+        send({ type: 'signal', to: peerId, connectionId, mode: entry.mode, allowDirect: entry.autoFallback === true, description: pc.localDescription })
       } catch { entry.restarting = false }
     }
-    pc.onicecandidate = ({ candidate }) => candidate && send({ type: 'signal', to: peerId, connectionId, candidate: candidate.toJSON() })
+    pc.onicecandidate = ({ candidate }) => { if (candidate) { entry.iceDiagnostics.gathered++; send({ type: 'signal', to: peerId, connectionId, candidate: candidate.toJSON() }) } }
     pc.oniceconnectionstatechange = () => {
       if (['connected', 'completed'].includes(pc.iceConnectionState)) { clearTimeout(entry.disconnectTimer); entry.disconnectTimer = null; entry.restarting = false }
       if (pc.iceConnectionState === 'failed') role === 'transmitter' ? entry.restart() : send({ type: 'restart-request', to: peerId, connectionId })
@@ -263,8 +269,9 @@ export default function App() {
     if (role === 'transmitter') entry.fallbackTimer = setTimeout(() => {
       if (['connected', 'completed'].includes(pc.iceConnectionState) || pc.connectionState === 'closed') return
       if (mode === 'auto' && iceServersRef.current.some((server) => JSON.stringify(server.urls).includes('turn'))) {
-        entry.mode = 'turn'; entry.restarting = false
-        pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'relay' })
+        entry.mode = 'turn'; entry.autoFallback = true; entry.restarting = false
+        // Automatic fallback adds relay paths without banning direct candidates.
+        pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'all' })
         entry.restart()
         entry.fallbackTimer = setTimeout(() => {
           if (!['connected', 'completed'].includes(pc.iceConnectionState) && pc.connectionState !== 'closed') failConnection()
@@ -351,6 +358,7 @@ export default function App() {
           return
         }
         entry = createPeer(message.connectionId, message.from, 'viewer', message.mode || 'auto')
+        if (message.mode === 'turn' && message.allowDirect === true) { entry.autoFallback = true; entry.pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'all' }) }
         entry.pc.ontrack = ({ streams, track }) => {
           setRemoteScreens((current) => {
             const existing = current[message.connectionId]
@@ -363,13 +371,20 @@ export default function App() {
         setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, waiting: false, stream: null, hasAudio: false } }))
       }
       if (message.description) {
-        if (message.mode === 'turn' && entry.mode === 'auto') { entry.mode = 'turn'; entry.pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'relay' }) }
+        if (message.mode === 'turn' && entry.mode === 'auto') { entry.mode = 'turn'; entry.autoFallback = message.allowDirect === true; entry.pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: entry.autoFallback ? 'all' : 'relay' }) }
         await entry.pc.setRemoteDescription(message.description)
         if (message.description.type === 'answer') { entry.restarting = false; await entry.configureSender?.() }
-        for (const candidate of entry.pendingCandidates.splice(0)) await entry.pc.addIceCandidate(candidate)
+        for (const candidate of entry.pendingCandidates.splice(0)) {
+          try { await entry.pc.addIceCandidate(candidate); entry.iceDiagnostics.applied++ }
+          catch { entry.iceDiagnostics.rejected++ /* A stale ICE generation must not kill a live stream. */ }
+        }
         if (message.description.type === 'offer') { const answer = await entry.pc.createAnswer(); await entry.pc.setLocalDescription(answer); send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription }) }
       } else if (message.candidate) {
-        if (entry.pc.remoteDescription) await entry.pc.addIceCandidate(message.candidate); else entry.pendingCandidates.push(message.candidate)
+        entry.iceDiagnostics.received++
+        if (entry.pc.remoteDescription) {
+          try { await entry.pc.addIceCandidate(message.candidate); entry.iceDiagnostics.applied++ }
+          catch { entry.iceDiagnostics.rejected++ }
+        } else if (entry.pendingCandidates.length < 64) entry.pendingCandidates.push(message.candidate)
       }
     } catch { closeConnection(message.connectionId, false); setNotice('Uma das transmissões não conseguiu conectar.') }
   }, [closeConnection, createPeer, send, startStats])

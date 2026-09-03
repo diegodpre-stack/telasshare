@@ -16,10 +16,25 @@ export default function MediaDiagnostics({ peers }) {
           let state = states.get(id)
           if (!state) { state = { label: `Conexão ${++sequence}`, previous: new Map() }; states.set(id, state) }
           try {
-            const result = summarizeStats(await entry.pc.getStats(), state.previous)
+            const stats = await entry.pc.getStats()
+            const result = summarizeStats(stats, state.previous)
             if (disposed) return
             state.previous = result.next
-            for (const row of result.rows) rows.push({ connection: state.label, state: entry.pc.connectionState, ...row })
+            const candidateCounts = {}, pairStates = {}
+            for (const report of stats.values()) {
+              if (['local-candidate', 'remote-candidate'].includes(report.type)) {
+                const key = `${report.type}/${report.candidateType}/${report.protocol}`
+                candidateCounts[key] = (candidateCounts[key] || 0) + 1
+              }
+              if (report.type === 'candidate-pair') pairStates[report.state] = (pairStates[report.state] || 0) + 1
+            }
+            const negotiation = {
+              iceState: entry.pc.iceConnectionState, gatheringState: entry.pc.iceGatheringState,
+              signalingState: entry.pc.signalingState, policy: entry.pc.getConfiguration().iceTransportPolicy,
+              localDescription: entry.pc.localDescription?.type ?? null, remoteDescription: entry.pc.remoteDescription?.type ?? null,
+              candidateCounts, pairStates, counters: entry.iceDiagnostics ? structuredClone(entry.iceDiagnostics) : null,
+            }
+            for (const row of result.rows.length ? result.rows : [{ direction: entry.role === 'transmitter' ? 'envio' : 'recepção' }]) rows.push({ connection: state.label, state: entry.pc.connectionState, negotiation, ...row })
           } catch { /* A peer may close while sampling. */ }
         }
         for (const id of states.keys()) if (!peers.current.has(id)) states.delete(id)

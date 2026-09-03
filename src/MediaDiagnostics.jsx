@@ -30,7 +30,7 @@ export default function MediaDiagnostics({ peers }) {
             }
             const negotiation = {
               iceState: entry.pc.iceConnectionState, gatheringState: entry.pc.iceGatheringState,
-              signalingState: entry.pc.signalingState, policy: entry.pc.getConfiguration().iceTransportPolicy,
+              signalingState: entry.pc.signalingState, policy: entry.pc.getConfiguration().iceTransportPolicy, transportStage: entry.turnTransport ?? null,
               localDescription: entry.pc.localDescription?.type ?? null, remoteDescription: entry.pc.remoteDescription?.type ?? null,
               candidateCounts, pairStates, counters: entry.iceDiagnostics ? structuredClone(entry.iceDiagnostics) : null,
             }

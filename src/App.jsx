@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MediaDiagnostics from './MediaDiagnostics.jsx'
+import { selectIceServers } from './icePolicy.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -232,10 +233,10 @@ export default function App() {
   }, [closeConnection])
 
   const createPeer = useCallback((connectionId, peerId, role, mode = 'auto') => {
-    const directServers = iceServersRef.current.map((server) => ({ ...server, urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url) => /^stuns?:/.test(url)) })).filter((server) => server.urls.length)
-    const pc = new RTCPeerConnection({ iceServers: mode === 'turn' ? iceServersRef.current : directServers, iceTransportPolicy: mode === 'turn' ? 'relay' : 'all' })
+    const pc = new RTCPeerConnection({ iceServers: selectIceServers(iceServersRef.current, mode === 'turn' ? 'udp' : 'direct'), iceTransportPolicy: mode === 'turn' ? 'relay' : 'all' })
     const entry = { pc, peerId, role, mode, pendingCandidates: earlyCandidatesRef.current.get(connectionId) || [], disconnectTimer: null, restarting: false }; earlyCandidatesRef.current.delete(connectionId); pcsRef.current.set(connectionId, entry)
     entry.iceDiagnostics = { gathered: 0, received: entry.pendingCandidates.length, applied: 0, rejected: 0, errors: [] }
+    entry.turnTransport = mode === 'turn' ? 'udp' : 'direct'
     pc.onicecandidateerror = (event) => {
       // Never store candidate addresses, URLs, SDP, or error text (may contain IPs).
       entry.iceDiagnostics.errors.push({ time: Date.now(), code: event.errorCode })
@@ -253,7 +254,7 @@ export default function App() {
       try {
         pc.restartIce()
         const offer = await pc.createOffer({ iceRestart: true }); await pc.setLocalDescription(offer)
-        send({ type: 'signal', to: peerId, connectionId, mode: entry.mode, allowDirect: entry.autoFallback === true, description: pc.localDescription })
+        send({ type: 'signal', to: peerId, connectionId, mode: entry.mode, turnTransport: entry.turnTransport, allowDirect: entry.autoFallback === true, description: pc.localDescription })
       } catch { entry.restarting = false }
     }
     pc.onicecandidate = ({ candidate }) => { if (candidate) { entry.iceDiagnostics.gathered++; send({ type: 'signal', to: peerId, connectionId, candidate: candidate.toJSON() }) } }
@@ -266,20 +267,19 @@ export default function App() {
       }, 5_000)
     }
     pc.onconnectionstatechange = () => { if (pc.connectionState === 'closed' && pcsRef.current.get(connectionId)?.pc === pc) closeConnection(connectionId, false) }
-    if (role === 'transmitter') entry.fallbackTimer = setTimeout(() => {
+    const advanceFallback = () => {
       if (['connected', 'completed'].includes(pc.iceConnectionState) || pc.connectionState === 'closed') return
-      if (mode === 'auto' && iceServersRef.current.some((server) => JSON.stringify(server.urls).includes('turn'))) {
-        entry.mode = 'turn'; entry.autoFallback = true; entry.restarting = false
-        // Automatic fallback adds relay paths without banning direct candidates.
-        pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'all' })
+      if (mode !== 'p2p' && entry.turnTransport !== 'all' && iceServersRef.current.some((server) => JSON.stringify(server.urls).includes('turn'))) {
+        entry.mode = 'turn'; entry.autoFallback = mode === 'auto'; entry.restarting = false
+        entry.turnTransport = entry.turnTransport === 'direct' ? 'udp' : 'all'
+        pc.setConfiguration({ iceServers: selectIceServers(iceServersRef.current, entry.turnTransport), iceTransportPolicy: entry.autoFallback ? 'all' : 'relay' })
         entry.restart()
-        entry.fallbackTimer = setTimeout(() => {
-          if (!['connected', 'completed'].includes(pc.iceConnectionState) && pc.connectionState !== 'closed') failConnection()
-        }, 30000)
+        entry.fallbackTimer = setTimeout(advanceFallback, entry.turnTransport === 'udp' ? 15000 : 30000)
       } else {
         failConnection()
       }
-    }, 30000)
+    }
+    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, mode === 'turn' ? 15000 : 30000)
     return entry
   }, [closeConnection, send])
 
@@ -358,7 +358,6 @@ export default function App() {
           return
         }
         entry = createPeer(message.connectionId, message.from, 'viewer', message.mode || 'auto')
-        if (message.mode === 'turn' && message.allowDirect === true) { entry.autoFallback = true; entry.pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: 'all' }) }
         entry.pc.ontrack = ({ streams, track }) => {
           setRemoteScreens((current) => {
             const existing = current[message.connectionId]
@@ -371,7 +370,11 @@ export default function App() {
         setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, waiting: false, stream: null, hasAudio: false } }))
       }
       if (message.description) {
-        if (message.mode === 'turn' && entry.mode === 'auto') { entry.mode = 'turn'; entry.autoFallback = message.allowDirect === true; entry.pc.setConfiguration({ iceServers: iceServersRef.current, iceTransportPolicy: entry.autoFallback ? 'all' : 'relay' }) }
+        if (message.description.type === 'offer' && message.mode === 'turn') {
+          entry.mode = 'turn'; entry.autoFallback = message.allowDirect === true
+          entry.turnTransport = message.turnTransport === 'udp' ? 'udp' : 'all'
+          entry.pc.setConfiguration({ iceServers: selectIceServers(iceServersRef.current, entry.turnTransport), iceTransportPolicy: entry.autoFallback ? 'all' : 'relay' })
+        }
         await entry.pc.setRemoteDescription(message.description)
         if (message.description.type === 'answer') { entry.restarting = false; await entry.configureSender?.() }
         for (const candidate of entry.pendingCandidates.splice(0)) {
@@ -564,7 +567,7 @@ export default function App() {
         const audioSender = entry.pc.addTrack(audioTrack, stream)
         try { const parameters = audioSender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = 256_000; await audioSender.setParameters(parameters) } catch { /* best effort */ }
       }
-      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, description: entry.pc.localDescription })
+      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, turnTransport: entry.turnTransport, description: entry.pc.localDescription })
       setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); startRouteStats(connectionId, entry.pc); setNotice('Novo espectador conectado à sua transmissão.')
     } catch { setNotice('Não foi possível conectar o novo espectador.') }
   }

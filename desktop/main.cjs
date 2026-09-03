@@ -117,11 +117,12 @@ async function chooseDisplaySource(request, callback) {
 function configureSession() {
   const appSession = session.defaultSession
   appSession.setDisplayMediaRequestHandler(chooseDisplaySource)
-  appSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(isTrustedUrl(webContents.getURL()) && ['media', 'fullscreen'].includes(permission))
+  const allowed = ['media', 'fullscreen', 'local-network', 'local-network-access', 'loopback-network']
+  appSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    callback(isTrustedUrl(webContents.getURL()) && isTrustedUrl(details.requestingUrl || webContents.getURL()) && allowed.includes(permission))
   })
-  appSession.setPermissionCheckHandler((webContents, permission) => {
-    return isTrustedUrl(webContents?.getURL?.() || '') && ['media', 'fullscreen'].includes(permission)
+  appSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    return isTrustedUrl(webContents?.getURL?.() || '') && isTrustedUrl(requestingOrigin) && allowed.includes(permission)
   })
 }
 

@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EntreTelas — teste SFU local</title><link rel="stylesheet" href="/style.css"></head>
+<body><main><header><small>LABORATÓRIO · SEM CLOUDFLARE</small><h1>EntreTelas local</h1><p>Teste separado. A mídia passa pelo servidor deste PC. Não altera suas salas do site.</p></header>
+<form id="login"><label>Seu nome <input id="name" maxlength="32" required placeholder="Nome para o teste"></label><button>Entrar no teste</button></form>
+<section id="controls" hidden><button id="share">Compartilhar tela · 1080p60</button><button id="stop" disabled>Parar transmissão</button><button id="leave">Sair</button><p id="active" hidden>● TRANSMISSÃO ATIVA — somente a origem que você escolheu</p></section>
+<p id="status" role="status">Abra duas abas: transmita em uma e assista na outra.</p><div id="videos"></div>
+<details><summary>Diagnóstico</summary><p>Prévia não é uma medição do vídeo recebido. Os dados abaixo são do codificador/decodificador. Uma cena parada pode ter FPS baixo normalmente.</p><pre id="stats">Aguardando transmissão.</pre></details>
+<p>Este primeiro teste funciona apenas neste PC. Acesso externo ainda não habilitado. Áudio desativado para isolar o teste de vídeo.</p></main><script type="module" src="/main.js"></script></body></html>

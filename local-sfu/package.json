@@ -1,0 +1,17 @@
+{
+  "name": "entretelas-local-sfu-test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "build": "esbuild web/main.js --bundle --format=esm --outfile=dist/main.js"
+  },
+  "dependencies": {
+    "livekit-client": "^2.0.0",
+    "livekit-server-sdk": "^2.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "esbuild": "^0.25.0"
+  }
+}

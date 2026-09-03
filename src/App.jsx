@@ -19,7 +19,27 @@ const staticIceServers = () => {
   if (turn.length) servers.push({ urls: turn, username: import.meta.env.VITE_TURN_USERNAME || '', credential: import.meta.env.VITE_TURN_CREDENTIAL || '' })
   return servers
 }
+// VP8 is what Chrome negotiates by default and the worst fit here: no hardware encoder, so 1080p60
+// screen capture falls on the CPU. Rank the hardware-friendly codecs first and leave VP8 as the floor.
+const codecRank = (codec) => {
+  const name = String(codec.mimeType || '').toLowerCase()
+  if (name.endsWith('/h264')) return 0
+  if (name.endsWith('/av1') || name.endsWith('/av01')) return 1
+  if (name.endsWith('/vp9')) return 2
+  if (name.endsWith('/vp8')) return 3
+  return 4
+}
+const preferHardwareVideoCodecs = (pc, sender) => {
+  const capabilities = RTCRtpSender.getCapabilities?.('video')
+  const transceiver = pc.getTransceivers().find((item) => item.sender === sender)
+  if (!capabilities?.codecs?.length || !transceiver?.setCodecPreferences) return null
+  const ordered = [...capabilities.codecs].sort((a, b) => codecRank(a) - codecRank(b))
+  try { transceiver.setCodecPreferences(ordered); return ordered[0]?.mimeType || null }
+  catch { return null }
+}
+
 const audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
+
 async function attachDesktopWindowAudio(stream, onError) {
   const bridge = window.electronAPI
   if (!bridge?.isWindowAudioActive || !(await bridge.isWindowAudioActive())) return null
@@ -594,6 +614,7 @@ export default function App() {
       const stream = localStreamRef.current; if (!stream) return
       const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter', mode); const videoTrack = stream.getVideoTracks()[0]
       const sender = entry.pc.addTrack(videoTrack, stream)
+      entry.videoCodec = preferHardwareVideoCodecs(entry.pc, sender)
       let settingsQueue = Promise.resolve()
       const configureSender = () => {
         settingsQueue = settingsQueue.catch(() => {}).then(async () => {

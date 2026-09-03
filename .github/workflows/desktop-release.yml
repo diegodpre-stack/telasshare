@@ -21,6 +21,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: microsoft/setup-msbuild@v2
       - run: npm ci
       - name: Create a newer app version for this build
         shell: pwsh

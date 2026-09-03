@@ -227,7 +227,7 @@ export default function App() {
     const entry = pcsRef.current.get(connectionId)
     if (!entry) { setRemoteScreens((current) => { const next = { ...current }; delete next[connectionId]; return next }); return }
     if (notify) send({ type: 'stop', to: entry.peerId, connectionId })
-    clearInterval(statsRef.current.get(connectionId)); statsRef.current.delete(connectionId); clearTimeout(entry.disconnectTimer); clearTimeout(entry.fallbackTimer)
+    clearInterval(statsRef.current.get(connectionId)); statsRef.current.delete(connectionId); clearTimeout(entry.disconnectTimer); clearTimeout(entry.fallbackTimer); clearTimeout(entry.restartRetry)
     entry.pc.close(); pcsRef.current.delete(connectionId)
     if (entry.role === 'viewer') setRemoteScreens((current) => { const next = { ...current }; delete next[connectionId]; return next })
     else setViewers((current) => { const next = { ...current }; delete next[connectionId]; return next })
@@ -250,7 +250,7 @@ export default function App() {
 
   const createPeer = useCallback((connectionId, peerId, role, mode = 'auto') => {
     const pc = new RTCPeerConnection({ iceServers: selectIceServers(iceServersRef.current, mode === 'turn' ? 'udp' : 'direct'), iceTransportPolicy: mode === 'turn' ? 'relay' : 'all' })
-    const entry = { pc, peerId, role, mode, pendingCandidates: earlyCandidatesRef.current.get(connectionId) || [], disconnectTimer: null, restarting: false }; earlyCandidatesRef.current.delete(connectionId); pcsRef.current.set(connectionId, entry)
+    const entry = { pc, peerId, role, mode, pendingCandidates: earlyCandidatesRef.current.get(connectionId) || [], disconnectTimer: null, restarting: false, settled: false }; earlyCandidatesRef.current.delete(connectionId); pcsRef.current.set(connectionId, entry)
     entry.iceDiagnostics = { gathered: 0, received: entry.pendingCandidates.length, applied: 0, rejected: 0, errors: [] }
     entry.turnTransport = mode === 'turn' ? 'udp' : 'direct'
     pc.onicecandidateerror = (event) => {
@@ -265,17 +265,28 @@ export default function App() {
       setNotice('A conexão expirou. O espectador recebeu o diagnóstico; a sua captura continua ativa.')
     }
     entry.restart = async () => {
-      if (entry.restarting || pc.signalingState !== 'stable' || pc.connectionState === 'closed') return
+      if (entry.restarting || pc.connectionState === 'closed') return false
+      if (pc.signalingState !== 'stable') {
+        // Negotiation is in flight: retry instead of dropping the restart on the floor.
+        clearTimeout(entry.restartRetry); entry.restartRetry = setTimeout(() => entry.restart(), 1_000)
+        return false
+      }
       entry.restarting = true
       try {
         pc.restartIce()
         const offer = await pc.createOffer({ iceRestart: true }); await pc.setLocalDescription(offer)
         send({ type: 'signal', to: peerId, connectionId, mode: entry.mode, turnTransport: entry.turnTransport, allowDirect: entry.autoFallback === true, description: pc.localDescription })
-      } catch { entry.restarting = false }
+        return true
+      } catch { entry.restarting = false; return false }
     }
     pc.onicecandidate = ({ candidate }) => { if (candidate) { entry.iceDiagnostics.gathered++; send({ type: 'signal', to: peerId, connectionId, candidate: candidate.toJSON() }) } }
     pc.oniceconnectionstatechange = () => {
-      if (['connected', 'completed'].includes(pc.iceConnectionState)) { clearTimeout(entry.disconnectTimer); entry.disconnectTimer = null; entry.restarting = false }
+      if (['connected', 'completed'].includes(pc.iceConnectionState)) {
+        clearTimeout(entry.disconnectTimer); entry.disconnectTimer = null
+        // A working route must never be escalated by a timer that is still armed.
+        clearTimeout(entry.fallbackTimer); entry.fallbackTimer = null
+        entry.restarting = false; entry.settled = true
+      }
       if (pc.iceConnectionState === 'failed') role === 'transmitter' ? entry.restart() : send({ type: 'restart-request', to: peerId, connectionId })
       if (pc.iceConnectionState === 'disconnected' && !entry.disconnectTimer) entry.disconnectTimer = setTimeout(() => {
         entry.disconnectTimer = null
@@ -285,12 +296,16 @@ export default function App() {
     pc.onconnectionstatechange = () => { if (pc.connectionState === 'closed' && pcsRef.current.get(connectionId)?.pc === pc) closeConnection(connectionId, false) }
     const advanceFallback = () => {
       if (['connected', 'completed'].includes(pc.iceConnectionState) || pc.connectionState === 'closed') return
+      // A route that already carried media is having a blip, not a routing failure. Wait for the ICE
+      // restart to recover it instead of pinning the viewer to a relay for the rest of the session.
+      if (entry.settled && pc.iceConnectionState !== 'failed') { entry.fallbackTimer = setTimeout(advanceFallback, 15_000); return }
       if (mode !== 'p2p' && entry.turnTransport !== 'all' && iceServersRef.current.some((server) => JSON.stringify(server.urls).includes('turn'))) {
         entry.mode = 'turn'; entry.autoFallback = mode === 'auto'; entry.restarting = false
         entry.turnTransport = entry.turnTransport === 'direct' ? 'udp' : 'all'
         pc.setConfiguration({ iceServers: selectIceServers(iceServersRef.current, entry.turnTransport), iceTransportPolicy: entry.autoFallback ? 'all' : 'relay' })
         entry.restart()
-        entry.fallbackTimer = setTimeout(advanceFallback, entry.turnTransport === 'udp' ? 15000 : 30000)
+        // Relay over UDP needs room to complete; rushing this stage is what lets TCP win the race.
+        entry.fallbackTimer = setTimeout(advanceFallback, 30_000)
       } else {
         failConnection()
       }

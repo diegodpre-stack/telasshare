@@ -132,16 +132,30 @@ function RemoteScreen({ screen, name, size, onStop }) {
   </article>
 }
 
-function SelfPreview({ stream, onClose }) {
+function SelfPreview({ stream, routeLabel, outboundFpsLabel, onClose }) {
   const videoRef = useRef(null)
+  const [actualFps, setActualFps] = useState(null)
   const settings = stream?.getVideoTracks()[0]?.getSettings?.() || {}
   useEffect(() => {
-    if (!videoRef.current) return
-    videoRef.current.srcObject = stream
-    videoRef.current.play().catch(() => {})
-  }, [stream])
+    const video = videoRef.current
+    if (!video) return
+    video.srcObject = stream
+    video.play().catch(() => {})
+    if (!video.requestVideoFrameCallback) { setActualFps(settings.frameRate ? Math.round(settings.frameRate) : null); return }
+    let callbackId; let frames = 0; let startedAt = performance.now(); let disposed = false
+    const measure = (now) => {
+      if (disposed) return
+      frames += 1
+      const elapsed = now - startedAt
+      if (elapsed >= 1000) { setActualFps(Math.round(frames * 1000 / elapsed)); frames = 0; startedAt = now }
+      callbackId = video.requestVideoFrameCallback(measure)
+    }
+    callbackId = video.requestVideoFrameCallback(measure)
+    return () => { disposed = true; if (callbackId) video.cancelVideoFrameCallback?.(callbackId) }
+  }, [settings.frameRate, stream])
   const goFullscreen = () => videoRef.current?.parentElement?.requestFullscreen?.()
-  return <div className="modal-backdrop"><section className="self-preview-modal" role="dialog" aria-modal="true" aria-labelledby="self-preview-title"><div className="screen-card-head"><div><i /><strong id="self-preview-title">Prévia da sua transmissão</strong><span>{settings.width && settings.height ? `${settings.width}×${settings.height}` : 'resolução automática'}{settings.frameRate ? ` · ~${Math.round(settings.frameRate)} FPS` : ''}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Fechar prévia" onClick={onClose}><X size={16} /></button></div></div><div className="self-preview-video" onDoubleClick={goFullscreen}><video ref={videoRef} autoPlay playsInline muted /></div><p>Prévia local com áudio silenciado para evitar eco. Ela confirma a captura; a qualidade da conexão deve ser verificada por um espectador.</p></section></div>
+  const fpsLabel = outboundFpsLabel || (actualFps ? `~${actualFps} FPS capturados` : 'medindo FPS')
+  return <div className="modal-backdrop"><section className="self-preview-modal" role="dialog" aria-modal="true" aria-labelledby="self-preview-title"><div className="screen-card-head"><div><i /><strong id="self-preview-title">Prévia da sua transmissão</strong><span>{settings.width && settings.height ? `${settings.width}×${settings.height}` : 'resolução automática'} · {fpsLabel} · {routeLabel}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Fechar prévia" onClick={onClose}><X size={16} /></button></div></div><div className="self-preview-video" onDoubleClick={goFullscreen}><video ref={videoRef} autoPlay playsInline muted /></div><p>{outboundFpsLabel ? 'FPS realmente enviado aos espectadores pela conexão WebRTC.' : 'FPS medido na captura local; ainda não há espectador para medir o envio.'} A rota é calculada separadamente para cada espectador.</p></section></div>
 }
 
 export default function App() {
@@ -252,6 +266,27 @@ export default function App() {
     }, 3000)
     statsRef.current.set(connectionId, timer)
   }, [send])
+
+  const startRouteStats = (connectionId, pc) => {
+    const inspect = async () => {
+      try {
+        const stats = await pc.getStats()
+        let pair = null; let outboundFps = null
+        stats.forEach((report) => {
+          if (report.type === 'transport' && report.selectedCandidatePairId) pair = stats.get(report.selectedCandidatePairId)
+          if (!pair && report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) pair = report
+          if (report.type === 'outbound-rtp' && report.kind === 'video' && Number.isFinite(report.framesPerSecond)) outboundFps = Math.round(report.framesPerSecond)
+        })
+        if (!pair) return
+        const local = stats.get(pair.localCandidateId); const remote = stats.get(pair.remoteCandidateId)
+        const route = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'turn' : 'p2p'
+        setViewers((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], route, ...(outboundFps ? { fps: outboundFps } : {}) } } : current)
+      } catch { /* route statistics are optional on older browsers */ }
+    }
+    inspect()
+    const timer = setInterval(inspect, 3000)
+    statsRef.current.set(connectionId, timer)
+  }
 
   const handleSignal = useCallback(async (message) => {
     try {
@@ -438,7 +473,7 @@ export default function App() {
         try { const parameters = audioSender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = 256_000; await audioSender.setParameters(parameters) } catch { /* best effort */ }
       }
       const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, description: entry.pc.localDescription })
-      setViewers((current) => ({ ...current, [connectionId]: { peerId } })); setNotice('Novo espectador conectado à sua transmissão.')
+      setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); startRouteStats(connectionId, entry.pc); setNotice('Novo espectador conectado à sua transmissão.')
     } catch { setNotice('Não foi possível conectar o novo espectador.') }
   }
   const watch = (user) => { setRemoteScreens((current) => ({ ...current, [`waiting-${user.id}`]: { peerId: user.id, waiting: true } })); send({ type: 'watch-request', to: user.id }); setNotice(`Conectando à tela de ${user.name}…`) }
@@ -448,13 +483,17 @@ export default function App() {
   const userName = (id) => users.find((user) => user.id === id)?.name || 'amigo'
   const remoteEntries = Object.entries(remoteScreens)
   const viewerNames = [...new Set(Object.values(viewers).map((viewer) => userName(viewer.peerId)))]
+  const viewerRoutes = [...new Set(Object.values(viewers).map((viewer) => viewer.route).filter((route) => route && route !== 'connecting'))]
+  const routeLabel = !viewerNames.length ? 'sem espectadores' : viewerRoutes.length === 0 ? 'detectando conexão' : viewerRoutes.length > 1 ? 'conexão mista: P2P + TURN' : viewerRoutes[0] === 'turn' ? 'servidor auxiliar (TURN)' : 'conexão direta P2P'
+  const outboundFpsValues = Object.values(viewers).map((viewer) => viewer.fps).filter(Number.isFinite)
+  const outboundFpsLabel = outboundFpsValues.length ? Math.min(...outboundFpsValues) === Math.max(...outboundFpsValues) ? `~${outboundFpsValues[0]} FPS enviados` : `~${Math.min(...outboundFpsValues)}–${Math.max(...outboundFpsValues)} FPS enviados` : ''
 
   if (!siteSession) return <main className="shell login-shell"><section className="login-card"><div className="brand-mark"><MonitorUp size={28} /></div><p className="eyebrow">EntreTelas</p><h1>Entre para encontrar seus amigos.</h1><p className="intro">Usuários comuns precisam apenas escolher um nome. As salas continuam protegidas por suas próprias senhas.</p><form className="login-form" onSubmit={loginSite}><label htmlFor="name">Seu nome de usuário</label><input id="name" value={name} onChange={(event) => setName(event.target.value)} maxLength={32} placeholder="Ex.: Diego" autoFocus />{adminMode && <><label htmlFor="password">Senha administrativa</label><input id="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} maxLength={128} placeholder="Senha de ADM" autoComplete="current-password" autoFocus /></>}<button type="submit" disabled={joining}>{joining ? 'Entrando…' : adminMode ? 'Entrar como ADM' : 'Entrar no EntreTelas'}</button><button type="button" className="admin-login-toggle" onClick={() => { setAdminMode((current) => !current); setPassword(''); setAccessError('') }}>{adminMode ? 'Voltar para usuário comum' : 'ADM'}</button>{accessError && <p className="access-error" role="alert">{accessError}</p>}</form><div className="login-links"><div className="trust-line"><ShieldCheck size={17} /><span>Dentro de uma sala, somente os participantes veem quem está presente.</span></div></div></section></main>
 
   if (!joined) return <main className="shell lobby-shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>EntreTelas</strong><span>Olá, {name}{siteRole === 'superadmin' ? ' · SUPER ADM' : siteRole === 'admin' ? ' · ADM' : ''}</span></div></div><button className="leave-room" onClick={logoutSite}><LogOut size={15} />Sair do site</button></header><section className="lobby-heading"><div><p className="eyebrow">Lobby privado</p><h1>Escolha uma sala</h1><p>Somente o nome da sala aparece aqui. Usuários e transmissões continuam ocultos até você entrar.</p></div><button className="create-room-button" onClick={() => { setCreatingRoom(true); setAccessError('') }}><Plus size={17} />Criar sala</button></section>{accessError && !selectedRoom && !creatingRoom && <p className="lobby-error">{accessError}</p>}<section className="rooms-grid">{rooms.length ? rooms.map((room) => <button className="room-card" key={room.id} onClick={() => { setSelectedRoom(room); setRoomPassword(''); setAccessError('') }}><div className="room-icon"><DoorOpen size={22} /></div><div><strong>{room.name}</strong><span>{siteRole === 'superadmin' ? 'Acesso de SUPER ADM' : 'Clique para informar a senha'}</span></div><KeyRound size={17} /></button>) : <div className="rooms-empty"><DoorOpen size={35} /><strong>Nenhuma sala criada</strong><span>Crie a primeira sala e compartilhe a senha somente com quem você quiser.</span></div>}</section>{selectedRoom && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={(event) => { event.preventDefault(); joinRoom(selectedRoom) }}><button type="button" className="modal-close" onClick={() => setSelectedRoom(null)}><X size={17} /></button><div className="request-icon"><KeyRound size={25} /></div><p className="eyebrow">Sala privada</p><h3>{selectedRoom.name}</h3>{siteRole === 'superadmin' ? <p>Você pode entrar usando sua permissão de SUPER ADM.</p> : <><label htmlFor="room-password">Senha da sala</label><input id="room-password" type="password" value={roomPassword} onChange={(event) => setRoomPassword(event.target.value)} autoFocus /></>} {accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Entrando…' : siteRole === 'superadmin' ? 'Entrar como SUPER ADM' : 'Entrar na sala'}</button></form></div>}{creatingRoom && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={createRoom}><button type="button" className="modal-close" onClick={() => setCreatingRoom(false)}><X size={17} /></button><div className="request-icon"><Plus size={25} /></div><p className="eyebrow">Nova sala</p><h3>Criar sala privada</h3><label htmlFor="new-room-name">Nome da sala</label><input id="new-room-name" value={newRoomName} onChange={(event) => setNewRoomName(event.target.value)} maxLength={40} autoFocus /><label htmlFor="new-room-password">Senha da sala</label><input id="new-room-password" type="password" value={newRoomPassword} onChange={(event) => setNewRoomPassword(event.target.value)} minLength={4} maxLength={128} />{accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Criando…' : 'Criar e entrar'}</button></form></div>}</main>
 
   return <main className="shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>EntreTelas</strong><span>Sala · {roomName}</span></div></div><div className="header-actions"><div className={`connection ${connection}`}><span className="pulse" />{connection === 'online' ? <Wifi size={15} /> : <WifiOff size={15} />}{connection === 'online' ? 'Conectado' : connection === 'connecting' ? 'Conectando' : 'Offline'}</div><button className="leave-room" onClick={leaveRoom}><LogOut size={15} />Sair da sala</button></div></header>
-    {showSelfPreview && localStreamRef.current && <SelfPreview stream={localStreamRef.current} onClose={() => setShowSelfPreview(false)} />}
+    {showSelfPreview && localStreamRef.current && <SelfPreview stream={localStreamRef.current} routeLabel={routeLabel} outboundFpsLabel={outboundFpsLabel} onClose={() => setShowSelfPreview(false)} />}
     {localStreamRef.current && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {resolutions[resolution].label} · preferência {fps} FPS · {audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={() => setShowSelfPreview(true)}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />

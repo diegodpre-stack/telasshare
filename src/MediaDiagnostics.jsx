@@ -1,9 +1,30 @@
 import { useEffect, useRef, useState } from 'react'
 import { summarizeStats } from './mediaDiagnostics.js'
 
-export default function MediaDiagnostics({ peers }) {
+// What the capture track actually granted, which is not what we asked for. A source pinned to 30 FPS
+// caps the whole broadcast before a single frame reaches an encoder, and no sender setting can lift it.
+// Whitelisted fields only: never deviceId or any other identifier the settings object may carry.
+const captureState = (streamRef) => {
+  const track = streamRef?.current?.getVideoTracks?.()[0]
+  if (!track) return null
+  const settings = track.getSettings?.() || {}
+  const requested = track.getConstraints?.() || {}
+  const asked = requested.frameRate
+  return {
+    readyState: track.readyState,
+    grantedFps: Number.isFinite(settings.frameRate) ? Math.round(settings.frameRate * 100) / 100 : null,
+    requestedFps: typeof asked === 'object' && asked ? asked.ideal ?? asked.max ?? asked.exact ?? null : asked ?? null,
+    width: Number.isFinite(settings.width) ? settings.width : null,
+    height: Number.isFinite(settings.height) ? settings.height : null,
+    displaySurface: settings.displaySurface ?? null,
+    logicalSurface: typeof settings.logicalSurface === 'boolean' ? settings.logicalSurface : null,
+  }
+}
+
+export default function MediaDiagnostics({ peers, localStream }) {
   const history = useRef([])
   const [latest, setLatest] = useState([])
+  const [capture, setCapture] = useState(null)
   useEffect(() => {
     let disposed = false, busy = false, sequence = 0
     const states = new Map()
@@ -38,9 +59,13 @@ export default function MediaDiagnostics({ peers }) {
           } catch { /* A peer may close while sampling. */ }
         }
         for (const id of states.keys()) if (!peers.current.has(id)) states.delete(id)
+        const source = captureState(localStream)
         if (!disposed) {
           setLatest(rows)
-          if (rows.length) history.current.push({ time: new Date().toISOString(), rows, pageHidden: document.hidden })
+          setCapture(source)
+          // The capture track is worth sampling even with no viewer yet: a source pinned to 30 FPS
+          // shows up here before anyone connects, which is exactly when it is cheapest to notice.
+          if (rows.length || source) history.current.push({ time: new Date().toISOString(), rows, capture: source, pageHidden: document.hidden })
           // Ten minutes at two-second intervals; no network upload or persistent storage.
           history.current = history.current.filter((s) => Date.parse(s.time) >= Date.now() - 600_000).slice(-300)
         }
@@ -48,7 +73,7 @@ export default function MediaDiagnostics({ peers }) {
     }
     const timer = setInterval(sample, 2000)
     return () => { disposed = true; clearInterval(timer) }
-  }, [peers])
+  }, [peers, localStream])
   const download = () => {
     const blob = new Blob([JSON.stringify({ schema: 1, generatedAt: new Date().toISOString(), sampleIntervalMs: 2000, note: 'null = indisponível; perda total é cumulativa; relayProtocol é apenas do cliente local; FPS de captura vem de media-source, não da prévia.', samples: history.current }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob), link = document.createElement('a')
@@ -60,6 +85,14 @@ export default function MediaDiagnostics({ peers }) {
     <p>Histórico automático dos últimos 10 minutos nesta sala. Ao ocorrer uma queda, baixe o relatório aqui e peça ao espectador afetado para baixar o dele também. Não inclui nomes, IPs, senhas ou conteúdo da tela.</p>
     <button onClick={download} disabled={!history.current.length}>Baixar relatório</button>
     <p>“CPU” indica limitação de processamento informada pelo navegador, não uma medição de uso da GPU. “Bandwidth” indica adaptação à rede. Uma cena parada pode gerar poucos quadros normalmente.</p>
+    {capture && <div style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
+      <strong>Captura local · {value(capture.displaySurface)}</strong>
+      <p>FPS concedido pela fonte: {value(capture.grantedFps)} · FPS pedido: {value(capture.requestedFps)}<br />
+        Resolução da fonte: {value(capture.width)} × {value(capture.height)} · Estado: {value(capture.readyState)}<br />
+        {capture.grantedFps != null && capture.requestedFps != null && capture.grantedFps < capture.requestedFps - 1
+          ? 'A fonte concedeu menos FPS do que o pedido. Esse é o teto da transmissão: nenhum ajuste de codec ou bitrate passa dele.'
+          : 'A fonte aceitou o FPS pedido. Quedas abaixo disso vêm da codificação ou da rede, não da captura.'}</p>
+    </div>}
     {!latest.length && <p>Aguardando uma transmissão com espectador.</p>}
     {latest.map((row, index) => <div key={`${row.connection}-${index}`} style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
       <strong>{row.connection} · {row.direction} · {row.route || row.state}</strong>

@@ -29,11 +29,26 @@ const codecRank = (codec) => {
   if (name.endsWith('/vp8')) return 3
   return 4
 }
+const isH264 = (codec) => String(codec.mimeType || '').toLowerCase().endsWith('/h264')
+// Asking for H.264 is not enough: Chromium advertises several profiles and negotiates the first one
+// both sides accept, while the Windows/macOS hardware encoders (MFT/AMF, NVENC, VideoToolbox) only
+// implement the constrained profiles with packetization-mode=1. Landing on any other profile falls
+// back to the OpenH264 software encoder without a single warning — that fallback is what turns a
+// 1080p screen share into 40+ ms per frame. Put the profiles a hardware encoder can take first.
+const h264ProfileRank = (codec) => {
+  const fmtp = String(codec.sdpFmtpLine || '').toLowerCase()
+  if (!/packetization-mode=1/.test(fmtp)) return 3
+  const profile = /profile-level-id=([0-9a-f]{6})/.exec(fmtp)?.[1] || ''
+  if (profile.startsWith('42e0')) return 0
+  if (profile.startsWith('640c')) return 1
+  return 2
+}
 const preferHardwareVideoCodecs = (pc, sender) => {
   const capabilities = RTCRtpSender.getCapabilities?.('video')
   const transceiver = pc.getTransceivers().find((item) => item.sender === sender)
   if (!capabilities?.codecs?.length || !transceiver?.setCodecPreferences) return null
-  const ordered = [...capabilities.codecs].sort((a, b) => codecRank(a) - codecRank(b))
+  const ordered = [...capabilities.codecs].sort((a, b) =>
+    codecRank(a) - codecRank(b) || (isH264(a) && isH264(b) ? h264ProfileRank(a) - h264ProfileRank(b) : 0))
   try { transceiver.setCodecPreferences(ordered); return ordered[0]?.mimeType || null }
   catch { return null }
 }
@@ -686,7 +701,7 @@ export default function App() {
   if (!joined) return <main className="shell lobby-shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>EntreTelas</strong><span>Olá, {name}{siteRole === 'superadmin' ? ' · SUPER ADM' : siteRole === 'admin' ? ' · ADM' : ''}</span></div></div><button className="leave-room" onClick={logoutSite}><LogOut size={15} />Sair do site</button></header><section className="lobby-heading"><div><p className="eyebrow">Lobby privado</p><h1>Escolha uma sala</h1><p>Somente o nome da sala aparece aqui. Usuários e transmissões continuam ocultos até você entrar.</p></div><button className="create-room-button" onClick={() => { setCreatingRoom(true); setAccessError('') }}><Plus size={17} />Criar sala</button></section>{accessError && !selectedRoom && !creatingRoom && <p className="lobby-error">{accessError}</p>}<section className="rooms-grid">{rooms.length ? rooms.map((room) => <button className="room-card" key={room.id} onClick={() => { setSelectedRoom(room); setRoomPassword(''); setAccessError('') }}><div className="room-icon"><DoorOpen size={22} /></div><div><strong>{room.name}</strong><span>{siteRole === 'superadmin' ? 'Acesso de SUPER ADM' : 'Clique para informar a senha'}</span></div><KeyRound size={17} /></button>) : <div className="rooms-empty"><DoorOpen size={35} /><strong>Nenhuma sala criada</strong><span>Crie a primeira sala e compartilhe a senha somente com quem você quiser.</span></div>}</section>{selectedRoom && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={(event) => { event.preventDefault(); joinRoom(selectedRoom) }}><button type="button" className="modal-close" onClick={() => setSelectedRoom(null)}><X size={17} /></button><div className="request-icon"><KeyRound size={25} /></div><p className="eyebrow">Sala privada</p><h3>{selectedRoom.name}</h3>{siteRole === 'superadmin' ? <p>Você pode entrar usando sua permissão de SUPER ADM.</p> : <><label htmlFor="room-password">Senha da sala</label><input id="room-password" type="password" value={roomPassword} onChange={(event) => setRoomPassword(event.target.value)} autoFocus /></>} {accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Entrando…' : siteRole === 'superadmin' ? 'Entrar como SUPER ADM' : 'Entrar na sala'}</button></form></div>}{creatingRoom && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={createRoom}><button type="button" className="modal-close" onClick={() => setCreatingRoom(false)}><X size={17} /></button><div className="request-icon"><Plus size={25} /></div><p className="eyebrow">Nova sala</p><h3>Criar sala privada</h3><label htmlFor="new-room-name">Nome da sala</label><input id="new-room-name" value={newRoomName} onChange={(event) => setNewRoomName(event.target.value)} maxLength={40} autoFocus /><label htmlFor="new-room-password">Senha da sala</label><input id="new-room-password" type="password" value={newRoomPassword} onChange={(event) => setNewRoomPassword(event.target.value)} minLength={4} maxLength={128} />{accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Criando…' : 'Criar e entrar'}</button></form></div>}</main>
 
   return <main className="shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>EntreTelas</strong><span>Sala · {roomName}</span></div></div><div className="header-actions"><div className={`connection ${connection}`}><span className="pulse" />{connection === 'online' ? <Wifi size={15} /> : <WifiOff size={15} />}{connection === 'online' ? 'Conectado' : connection === 'connecting' ? 'Conectando' : 'Offline'}</div><button className="leave-room" onClick={leaveRoom}><LogOut size={15} />Sair da sala</button></div></header>
-    <MediaDiagnostics peers={pcsRef} />
+    <MediaDiagnostics peers={pcsRef} localStream={localStreamRef} />
     {showSelfPreview && localStreamRef.current && <SelfPreview stream={localStreamRef.current} routeLabel={routeLabel} outboundFpsLabel={outboundFpsLabel} onClose={() => setShowSelfPreview(false)} />}
     {localStreamRef.current && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {resolutions[resolution].label} · preferência {fps} FPS · {audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={() => setShowSelfPreview(true)}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>

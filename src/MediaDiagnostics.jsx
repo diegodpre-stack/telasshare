@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { summarizeStats } from './mediaDiagnostics.js'
 import { startCaptureRateMeter } from './captureRate.js'
 import { probeHardwareEncoders } from './encoderSupport.js'
+import { mediaEvents } from './mediaEvents.js'
 
 // What the capture track actually granted, which is not what we asked for. A source pinned to 30 FPS
 // caps the whole broadcast before a single frame reaches an encoder, and no sender setting can lift it.
@@ -53,6 +54,14 @@ export default function MediaDiagnostics({ peers, localStream }) {
   const [capture, setCapture] = useState(null)
   const meter = useRef(null)
   const [encoders, setEncoders] = useState(null)
+  const [events, setEvents] = useState([])
+  const [runtime, setRuntime] = useState(null)
+  const [downloading, setDownloading] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    window.electronAPI?.getMediaRuntimeDiagnostics?.().then((info) => { if (!cancelled) setRuntime(info) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
   useEffect(() => {
     let cancelled = false
     probeHardwareEncoders().then((rows) => { if (!cancelled) setEncoders(rows) }).catch(() => {})
@@ -102,6 +111,7 @@ export default function MediaDiagnostics({ peers, localStream }) {
         if (!disposed) {
           setLatest(rows)
           setCapture(source)
+          setEvents(mediaEvents.read())
           // The capture track is worth sampling even with no viewer yet: a source pinned to 30 FPS
           // shows up here before anyone connects, which is exactly when it is cheapest to notice.
           if (rows.length || source) history.current.push({ time: new Date().toISOString(), rows, capture: source, pageHidden: document.hidden })
@@ -116,8 +126,18 @@ export default function MediaDiagnostics({ peers, localStream }) {
       meter.current?.instance?.stop(); meter.current = null
     }
   }, [peers, localStream])
-  const download = () => {
-    const blob = new Blob([JSON.stringify({ schema: 1, generatedAt: new Date().toISOString(), sampleIntervalMs: 2000, note: 'null = indisponível; perda total é cumulativa; relayProtocol é apenas do cliente local; FPS de captura vem de media-source, não da prévia.', samples: history.current }, null, 2)], { type: 'application/json' })
+  const download = async () => {
+    setDownloading(true)
+    let nativeRuntime = runtime, timeout
+    try {
+      nativeRuntime = await Promise.race([
+        window.electronAPI?.getMediaRuntimeDiagnostics?.() ?? Promise.resolve(runtime),
+        new Promise((resolve) => { timeout = setTimeout(() => resolve(runtime), 1500) }),
+      ])
+      setRuntime(nativeRuntime)
+    } catch { /* Older desktop apps may not implement this IPC yet. */ }
+    finally { clearTimeout(timeout); setDownloading(false) }
+    const blob = new Blob([JSON.stringify({ schema: 2, generatedAt: new Date().toISOString(), sampleIntervalMs: 2000, note: 'null = indisponível; perda total é cumulativa; relayProtocol é apenas do cliente local; FPS de captura vem de media-source, não da prévia.', events: mediaEvents.read(), runtime: nativeRuntime, samples: history.current }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob), link = document.createElement('a')
     link.href = url; link.download = `entretelas-diagnostico-${Date.now()}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
@@ -125,7 +145,9 @@ export default function MediaDiagnostics({ peers, localStream }) {
   return <details style={{ margin: '12px 0', padding: 12, border: '1px solid #314759', borderRadius: 10 }}>
     <summary>Diagnóstico da transmissão (avançado)</summary>
     <p>Histórico automático dos últimos 10 minutos nesta sala. Ao ocorrer uma queda, baixe o relatório aqui e peça ao espectador afetado para baixar o dele também. Não inclui nomes, IPs, senhas ou conteúdo da tela.</p>
-    <button onClick={download} disabled={!history.current.length}>Baixar relatório</button>
+    <button onClick={download} disabled={downloading || (!history.current.length && !events.length)}>Baixar relatório</button>
+    {runtime && <p>Captura desktop: {runtime.zeroCopyCapture ? 'zero-copy experimental' : 'padrão (sem zero-copy forçado)'} · Hardware em baixa resolução: {runtime.lowResolutionHardware ? 'permitido, conforme suporte do codec' : 'política padrão do Chromium'}. O uso real do encoder continua indicado em cada conexão.</p>}
+    {!!events.length && <p>Último evento: {events[events.length - 1].type}{events[events.length - 1].phase ? ` · ${events[events.length - 1].phase}` : ''}. O relatório mantém eventos mesmo após uma transmissão terminar.</p>}
     <p>“CPU” indica limitação de processamento informada pelo navegador, não uma medição de uso da GPU. “Bandwidth” indica adaptação à rede. Uma cena parada pode gerar poucos quadros normalmente.</p>
     {capture && <div style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
       <strong>Captura local · {value(capture.displaySurface)}</strong>
@@ -149,8 +171,9 @@ export default function MediaDiagnostics({ peers, localStream }) {
     {latest.map((row, index) => <div key={`${row.connection}-${index}`} style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
       <strong>{row.connection} · {row.direction} · {row.route || row.state}</strong>
       <p>{value(row.width)} × {value(row.height)} · {value(row.fps, ' FPS')} · {value(row.mbps, ' Mbps')}<br />
-        Codec: {value(row.codec)} · Limitação: {value(row.limitation)} · {row.direction === 'envio' ? 'Codificação' : 'Decodificação'}: {value(row.frameProcessingMs, ' ms/quadro')}<br />
-        Implementação: {value(row.encoderImplementation ?? row.decoderImplementation)} · Encoder eficiente informado: {row.powerEfficientEncoder == null ? 'indisponível' : row.powerEfficientEncoder ? 'sim' : 'não'}<br />
+        Codec: {value(row.codec)}{row.h264Profile ? ` · perfil ${row.h264Profile}` : ''} · Limitação: {value(row.limitation)} · {row.direction === 'envio' ? 'Codificação' : 'Decodificação'}: {value(row.frameProcessingMs, ' ms/quadro')}<br />
+        Implementação: {value(row.encoderImplementation ?? row.decoderImplementation)} · {row.direction === 'envio' ? 'Encoder' : 'Decoder'} eficiente informado: {(row.direction === 'envio' ? row.powerEfficientEncoder : row.powerEfficientDecoder) == null ? 'indisponível' : (row.direction === 'envio' ? row.powerEfficientEncoder : row.powerEfficientDecoder) ? 'sim' : 'não'}<br />
+        Quadros {row.direction === 'envio' ? `codificados: ${value(row.framesEncoded)}` : `recebidos: ${value(row.framesReceived)} · decodificados: ${value(row.framesDecoded)}`}<br />
         Captura (quando informada): {value(row.captureFps, ' FPS')} · Ping: {value(row.rttMs, ' ms')} · Banda estimada: {value(row.availableMbps, ' Mbps')}<br />
         ICE: {value(row.iceProtocol)} · Transporte até TURN local: {value(row.localRelayProtocol)}<br />
         Candidato local: {value(row.localCandidateType)} · Remoto: {value(row.remoteCandidateType)}<br />

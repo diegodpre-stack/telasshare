@@ -3,6 +3,7 @@ import MediaDiagnostics from './MediaDiagnostics.jsx'
 import { buildIceConfiguration, initialIceStage, canPreserveWithoutTurn } from './icePolicy.js'
 import { applySenderSettings } from './senderSettings.js'
 import { preferHardwareVideoCodecs } from './encoderSupport.js'
+import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -323,6 +324,7 @@ export default function App() {
   }, [send])
 
   const stopSharing = useCallback((notify = true) => {
+    if (localStreamRef.current) mediaEvents.record('broadcast-stopped')
     for (const [id, entry] of pcsRef.current) if (entry.role === 'transmitter') closeConnection(id, notify)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
     window.electronAPI?.stopWindowAudio?.()
@@ -332,6 +334,7 @@ export default function App() {
     send({ type: 'broadcast-stop' }); setViewers({}); setNotice('Sua transmissão foi encerrada. As telas que você assiste continuam abertas.')
   }, [closeConnection, send])
   const closeAll = useCallback(() => {
+    if (localStreamRef.current) mediaEvents.record('capture-closed-with-room')
     earlyCandidatesRef.current.clear()
     for (const id of [...pcsRef.current.keys()]) closeConnection(id, false)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
@@ -493,8 +496,9 @@ export default function App() {
   }
 
   const handleSignal = useCallback(async (message) => {
+    let entry, phase = 'create-receiver'
     try {
-      let entry = pcsRef.current.get(message.connectionId)
+      entry = pcsRef.current.get(message.connectionId)
       if (!entry) {
         if (message.description?.type !== 'offer') {
           if (message.candidate && earlyCandidatesRef.current.size < 32) {
@@ -518,17 +522,23 @@ export default function App() {
       }
       if (message.description) {
         if (message.description.type === 'offer' && ['auto', 'turn', 'p2p'].includes(message.mode)) {
+          phase = 'configure-receiver-ice'
           entry.mode = message.mode; entry.autoFallback = message.mode === 'auto' || message.allowDirect === true
           entry.turnTransport = message.mode === 'p2p' ? 'direct' : ['direct', 'udp', 'all'].includes(message.turnTransport) ? message.turnTransport : initialIceStage(message.mode)
           entry.pc.setConfiguration(buildIceConfiguration(iceServersRef.current, entry.turnTransport, message.mode === 'turn' && !entry.autoFallback, entry.pc.getConfiguration()))
         }
+        phase = 'set-remote-description'
         await entry.pc.setRemoteDescription(message.description)
         if (message.description.type === 'answer') { entry.restarting = false; await entry.configureSender?.() }
         for (const candidate of entry.pendingCandidates.splice(0)) {
           try { await entry.pc.addIceCandidate(candidate); entry.iceDiagnostics.applied++ }
           catch { entry.iceDiagnostics.rejected++ /* A stale ICE generation must not kill a live stream. */ }
         }
-        if (message.description.type === 'offer') { const answer = await entry.pc.createAnswer(); await entry.pc.setLocalDescription(answer); send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription }) }
+        if (message.description.type === 'offer') {
+          phase = 'create-answer'; const answer = await entry.pc.createAnswer()
+          phase = 'set-local-answer'; await entry.pc.setLocalDescription(answer)
+          send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription })
+        }
       } else if (message.candidate) {
         entry.iceDiagnostics.received++
         if (entry.pc.remoteDescription) {
@@ -536,7 +546,11 @@ export default function App() {
           catch { entry.iceDiagnostics.rejected++ }
         } else if (entry.pendingCandidates.length < 64) entry.pendingCandidates.push(message.candidate)
       }
-    } catch { closeConnection(message.connectionId, false); setNotice('Uma das transmissões não conseguiu conectar.') }
+    } catch (error) {
+      recordPeerFailure(phase, error, entry?.pc)
+      closeConnection(message.connectionId, false)
+      setNotice(`Uma das transmissões não conseguiu conectar (${phase}). O motivo foi registrado no relatório de diagnóstico.`)
+    }
   }, [closeConnection, createPeer, send, startStats])
 
   useEffect(() => {
@@ -699,7 +713,16 @@ export default function App() {
     const audioTrack = stream.getAudioTracks()[0]
     setAudioStatus(audioTrack ? 'on' : shareAudio ? 'unavailable' : 'off')
     if (audioTrack) audioTrack.onended = () => setAudioStatus('unavailable')
-    stream.getVideoTracks()[0].onended = () => stopSharing(true); return stream
+    const videoTrack = stream.getVideoTracks()[0]
+    mediaEvents.record('capture-started', videoTrack.getSettings())
+    videoTrack.onended = () => {
+      // An old capture finishing must never stop a replacement stream.
+      if (localStreamRef.current !== stream) return
+      mediaEvents.record('capture-ended', { ...videoTrack.getSettings(), readyState: videoTrack.readyState })
+      stopSharing(true)
+      setNotice('A fonte de captura foi encerrada pelo navegador ou sistema (ou pelo controle de compartilhamento). O evento foi registrado no relatório de diagnóstico; inicie a captura novamente.')
+    }
+    return stream
   }
   const startBroadcast = async () => {
     try {
@@ -711,10 +734,13 @@ export default function App() {
     catch (error) { setNotice(error?.name === 'NotAllowedError' ? 'Você cancelou a escolha da tela.' : 'Não foi possível iniciar a captura.') }
   }
   const shareWith = async (peerId, mode = 'auto') => {
+    let entry, phase = 'create-sender'
+    const connectionId = crypto.randomUUID()
     try {
       const stream = localStreamRef.current; if (!stream) return
-      const connectionId = crypto.randomUUID(); const entry = createPeer(connectionId, peerId, 'transmitter', mode); const videoTrack = stream.getVideoTracks()[0]
+      entry = createPeer(connectionId, peerId, 'transmitter', mode); const videoTrack = stream.getVideoTracks()[0]
       const sender = entry.pc.addTrack(videoTrack, stream)
+      phase = 'select-codec'
       entry.videoCodec = await preferHardwareVideoCodecs(entry.pc, sender, preferredCodecRef.current, transmissionSettingsRef.current)
       if (entry.pc.signalingState === 'closed' || localStreamRef.current !== stream || videoTrack.readyState === 'ended') { closeConnection(connectionId); return }
       let settingsQueue = Promise.resolve()
@@ -724,7 +750,7 @@ export default function App() {
           try {
             const settings = { ...transmissionSettingsRef.current }
             if (await applySenderSettings(sender, settings)) entry.appliedSettings = settings
-          } catch { setNotice('Este navegador não aceitou os limites de envio; usando adaptação padrão.') }
+          } catch (error) { recordPeerFailure('set-sender-parameters', error, entry.pc); setNotice('Este navegador não aceitou os limites de envio; usando adaptação padrão.') }
         })
         return settingsQueue
       }
@@ -735,15 +761,21 @@ export default function App() {
         const audioSender = entry.pc.addTrack(audioTrack, stream)
         try { const parameters = audioSender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = 256_000; await audioSender.setParameters(parameters) } catch { /* best effort */ }
       }
+      phase = 'create-offer'
       const offer = await entry.pc.createOffer()
       const settings = transmissionSettingsRef.current
       // Open above Chromium's 0.3 Mbps so the first seconds are watchable, but modestly: the ceiling the
       // user picked describes their uplink, not the relay path in the middle, and overshooting it costs
       // resolution for as long as the estimator takes to recover.
       offer.sdp = withStartBitrate(offer.sdp, Math.min(2500, Math.round(settings.maxBitrate / 1000 / 4)))
+      phase = 'set-local-offer'
       await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, turnTransport: entry.turnTransport, description: entry.pc.localDescription })
       setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); startRouteStats(connectionId, entry.pc); setNotice('Novo espectador conectado à sua transmissão.')
-    } catch { setNotice('Não foi possível conectar o novo espectador.') }
+    } catch (error) {
+      recordPeerFailure(phase, error, entry?.pc)
+      if (entry) closeConnection(connectionId)
+      setNotice(`Não foi possível conectar o novo espectador (${phase}). ${localStreamRef.current?.getVideoTracks()[0]?.readyState === 'live' ? 'Sua captura continua ativa. ' : ''}O motivo foi registrado no relatório de diagnóstico.`)
+    }
   }
   const watch = (user) => { setRemoteScreens((current) => ({ ...current, [`waiting-${user.id}`]: { peerId: user.id, waiting: true } })); send({ type: 'watch-request', to: user.id, mode: watchMode }); setNotice(`Conectando à tela de ${user.name}…`) }
   const moderate = (user, action) => send({ type: 'moderate', to: user.id, action })

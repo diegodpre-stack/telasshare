@@ -1,0 +1,47 @@
+import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { createMediaEventLog, mediaEvents, recordPeerFailure } from '../src/mediaEvents.js'
+const { mediaFeaturePolicy, createMediaRuntimeLog } = createRequire(import.meta.url)('../desktop/mediaRuntime.cjs')
+
+const defaults = mediaFeaturePolicy({})
+assert.equal(defaults.zeroCopyCapture, false)
+assert.equal(defaults.lowResolutionHardware, true, 'disabling experimental capture must not disable hardware encoding')
+assert.ok(defaults.disabledFeatures.includes('ZeroCopyDesktopCapture'))
+assert.ok(defaults.disabledFeatures.includes('ForceSoftwareForRtcLowResolutions'))
+assert.ok(defaults.disabledFeatures.includes('WebRtcHideLocalIpsWithMdns'))
+assert.ok(!defaults.disabledFeatures.some((name) => /encoder|decod/i.test(name)))
+const experimental = mediaFeaturePolicy({ ENTRETELAS_GPU_CAPTURE: '1' })
+assert.equal(experimental.zeroCopyCapture, true)
+assert.ok(experimental.enabledFeatures.includes('ZeroCopyDesktopCapture'))
+assert.ok(!experimental.disabledFeatures.includes('ZeroCopyDesktopCapture'))
+const legacy = mediaFeaturePolicy({ ENTRETELAS_GPU_CAPTURE: '0' })
+assert.equal(legacy.lowResolutionHardware, false)
+assert.equal(legacy.zeroCopyCapture, false)
+assert.ok(!legacy.disabledFeatures.includes('ForceSoftwareForRtcLowResolutions'))
+
+const runtime = createMediaRuntimeLog(defaults, { electron: '44.1.1', chrome: '152.0.7977.65' })
+runtime.record('gpu-process-gone', { reason: 'crashed', exitCode: -1, pid: 123, name: 'SECRET', path: 'SECRET' })
+assert.equal(runtime.snapshot().events[0].reason, 'crashed')
+assert.equal(runtime.snapshot().events[0].exitCode, -1)
+assert.ok(!JSON.stringify(runtime.snapshot()).includes('SECRET'))
+runtime.snapshot().events[0].reason = 'modified'
+assert.equal(runtime.snapshot().events[0].reason, 'crashed', 'snapshots must not mutate history')
+for (let i = 0; i < 25; i++) runtime.record('gpu-process-gone', { reason: 'killed', exitCode: i })
+assert.equal(runtime.snapshot().events.length, 20)
+assert.equal(runtime.snapshot().events.at(-1).exitCode, 24)
+
+const events = createMediaEventLog(3)
+events.record('capture-ended', { readyState: 'ended', width: 1920, height: 1080, label: 'SECRET', deviceId: 'SECRET', sdp: 'SECRET', message: 'SECRET' })
+assert.equal(events.read()[0].readyState, 'ended')
+assert.equal(events.read()[0].width, 1920)
+assert.ok(!JSON.stringify(events.read()).includes('SECRET'))
+events.read()[0].readyState = 'modified'
+assert.equal(events.read()[0].readyState, 'ended')
+for (let i = 0; i < 5; i++) events.record('test', { width: i })
+assert.equal(events.read().length, 3)
+assert.equal(events.read().at(-1).width, 4)
+recordPeerFailure('set-remote-description', { name: 'RTCError', errorDetail: 'sdp-syntax-error', sdpLineNumber: 4, message: 'SECRET SDP' }, { signalingState: 'have-local-offer', iceConnectionState: 'new', connectionState: 'new' })
+assert.equal(mediaEvents.read().at(-1).phase, 'set-remote-description')
+assert.equal(mediaEvents.read().at(-1).sdpLineNumber, 4)
+assert.ok(!JSON.stringify(mediaEvents.read()).includes('SECRET'))
+console.log('PASS: independent hardware/capture policy, explicit experimental opt-in, bounded native/renderer failure logs and private-field exclusion.')

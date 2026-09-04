@@ -25,6 +25,11 @@ export function summarizeStats(stats, previous = new Map()) {
       frameProcessingMs: frames > 0 && totalTime !== null ? rounded(totalTime * 1000 / frames) : null,
       captureFps: number(source?.framesPerSecond), captureWidth: number(source?.width), captureHeight: number(source?.height),
       limitation: r.qualityLimitationReason ?? null, codec: codec?.mimeType ?? null,
+      // Only the negotiated H.264 profile, not arbitrary fmtp or SDP.
+      h264Profile: codec?.mimeType?.toLowerCase() === 'video/h264' ? /(?:^|;)\s*profile-level-id=([0-9a-f]{6})(?:;|$)/i.exec(codec.sdpFmtpLine || '')?.[1]?.toLowerCase() ?? null : null,
+      framesEncoded: sending ? number(r.framesEncoded) : null,
+      framesDecoded: sending ? null : number(r.framesDecoded),
+      framesReceived: sending ? null : number(r.framesReceived),
       encoderImplementation: sending ? r.encoderImplementation ?? null : null,
       decoderImplementation: sending ? null : r.decoderImplementation ?? null,
       powerEfficientEncoder: sending && typeof r.powerEfficientEncoder === 'boolean' ? r.powerEfficientEncoder : null,

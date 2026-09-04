@@ -16,6 +16,21 @@ const hardwareRow = summarizeStats(hardware).rows[0]
 assert.equal(hardwareRow.encoderImplementation, 'ExternalEncoder')
 assert.equal(hardwareRow.powerEfficientEncoder, true)
 assert.equal(hardwareRow.targetMbps, 8)
+assert.equal(hardwareRow.framesEncoded, 10)
+hardware.set('codec', { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;profile-level-id=42001f;packetization-mode=1;PRIVATE=SECRET' })
+hardware.get('video').codecId = 'codec'
+assert.equal(summarizeStats(hardware).rows[0].h264Profile, '42001f')
+assert.ok(!JSON.stringify(summarizeStats(hardware).rows).includes('SECRET'))
+const receiver = new Map([
+  ['codec', { mimeType: 'video/H264', sdpFmtpLine: 'profile-level-id=64001f;packetization-mode=1' }],
+  ['inbound', { type: 'inbound-rtp', kind: 'video', id: 'inbound', codecId: 'codec', framesReceived: 30, framesDecoded: 0, decoderImplementation: 'D3D11VideoDecoder', powerEfficientDecoder: true }],
+])
+const receiverRow = summarizeStats(receiver).rows[0]
+assert.equal(receiverRow.h264Profile, '64001f')
+assert.equal(receiverRow.framesReceived, 30)
+assert.equal(receiverRow.framesDecoded, 0, 'distinguish receiving packets from successful decoding')
+assert.equal(receiverRow.powerEfficientDecoder, true)
+assert.equal(receiverRow.powerEfficientEncoder, null)
 hardware.get('video').powerEfficientEncoder = false
 assert.equal(summarizeStats(hardware).rows[0].powerEfficientEncoder, false)
 const second = summarizeStats(make(3000, 70, 201000, .22), first.next)

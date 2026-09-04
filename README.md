@@ -93,6 +93,16 @@ npm run desktop
 
 O endereço alternativo aceita apenas loopback e é ignorado no aplicativo empacotado. Abra `http://localhost:8787` no navegador para entrar como espectador. Para verificar o encoder, use uma transmissão nova com movimento na tela, escolha **Automático** ou **H.264** e confira **Implementação** e **Encoder eficiente informado** no diagnóstico. A consulta de capacidade por perfil é uma indicação, não uma garantia; `OpenH264` é software, enquanto `MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)` identifica o encoder NVIDIA. Hardware não garante, por si só, mais FPS na captura ou na prévia.
 
+#### Compatibilidade de captura e H.264
+
+A captura zero-copy e a codificação por hardware são independentes. O desktop agora deixa `ZeroCopyDesktopCapture` desativado por padrão, mas continua permitindo encoders de hardware e priorizando os perfis eficientes informados pelo navegador. Isso evita forçar o caminho experimental de captura em todas as GPUs; não é uma confirmação de que um problema específico de driver foi corrigido. As proteções de drivers do Chromium continuam ativas.
+
+Essa alteração exige reiniciar o desktop com o código novo (ou instalar uma nova versão empacotada); atualizar somente o site não altera as flags do processo. O diagnóstico mostra a política de captura, o perfil H.264 negociado e os contadores de quadros codificados/recebidos/decodificados. O relatório mantém eventos de encerramento da captura e falhas de negociação mesmo depois que a transmissão desaparece, além de falhas do processo GPU no desktop novo. Não inclui conteúdo da tela, SDP, IPs ou mensagens brutas de exceções.
+
+Para comparar a captura experimental em um teste controlado, use `$env:ENTRETELAS_GPU_CAPTURE = '1'` antes de iniciar o desktop. Remova a variável para voltar ao novo padrão. O valor legado `0` também restaura a política padrão do Chromium que pode preferir software em resoluções baixas; não use esse valor para verificar que o encoder permanece em hardware. Nenhuma dessas configurações garante suporte ou estabilidade em um driver específico.
+
+Testes de regressão: `node scripts/test-encoder-support.mjs`, `node scripts/test-media-runtime.mjs` e `node scripts/test-media-diagnostics.mjs`. A validação real deve conferir quadros decodificados e imagem no receptor, além de `powerEfficientEncoder` no transmissor. Um teste NVIDIA→NVIDIA não comprova compatibilidade AMD→NVIDIA ou NVIDIA→AMD.
+
 Para voltar ao serviço publicado ou gerar o instalador:
 
 ```powershell

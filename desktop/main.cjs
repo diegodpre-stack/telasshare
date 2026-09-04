@@ -14,41 +14,16 @@ if (localAppUrl) {
 }
 const APP_URL = localAppUrl || 'https://telasshare.onrender.com'
 
-// Chromium reads each of these switches once, so every feature has to travel in a single list. Adding
-// a second appendSwitch for the same switch name silently replaces the first.
-const disabledFeatures = [
-  // Chromium hides host candidates behind .local mDNS names. A browser resolves its own names, but the
-  // packaged app does not, so every host candidate is dead on arrival and only the relay path survives.
-  'WebRtcHideLocalIpsWithMdns',
-]
-const enabledFeatures = []
+// Apply one list per switch: appendSwitch replaces a previous value for the same switch.
+const { mediaFeaturePolicy, createMediaRuntimeLog } = require('./mediaRuntime.cjs')
+const mediaPolicy = mediaFeaturePolicy()
+const mediaRuntime = createMediaRuntimeLog(mediaPolicy)
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default')
-
-// A page cannot choose how the browser copies the screen, which is why the same site captures at very
-// different rates on different machines: measured here, a 1440p screen cost about 7.5 ms of work per
-// megapixel per frame, holding the source near 36 FPS with a game running and to 52 while idle.
-// ZeroCopyDesktopCapture keeps captured frames in GPU memory instead of copying them out to the CPU
-// and back. Chromium ships it off by default while it rolls out, and the packaged app is the only
-// place we can ask for it — a browser tab has no say over its own command line.
-//
-// Keeping frames on the GPU during capture only pays off if nothing downstream drags them back, and a
-// software encoder does exactly that: it needs the pixels in CPU memory. Chromium was picking
-// MediaFoundationSoftwareVideoEncoder here even though the GPU reports a hardware encoder available.
-// ForceSoftwareForRtcLowResolutions, on by default outside Android, pins a call to a software encoder
-// while the picture is small. A broadcast starts small on purpose — bandwidth estimation opens around
-// 0.3 Mbps and the encoder picks a matching size — so the decision is taken at the one moment the
-// answer is guaranteed to be "small", and the resolution climbing afterwards does not revisit it.
-//
-// Every name here was checked against this Electron's Chromium (152) first: an unknown feature is
-// ignored without a word, which looks exactly like a change that did not help. A second candidate,
-// MediaFoundationSharedImageEncode, exists only on Chromium main and was left out for that reason.
-// Both are experimental, so ENTRETELAS_GPU_CAPTURE=0 turns them off without needing a new build.
-if (process.env.ENTRETELAS_GPU_CAPTURE !== '0') {
-  enabledFeatures.push('ZeroCopyDesktopCapture')
-  disabledFeatures.push('ForceSoftwareForRtcLowResolutions')
-}
-if (enabledFeatures.length) app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','))
-if (disabledFeatures.length) app.commandLine.appendSwitch('disable-features', disabledFeatures.join(','))
+if (mediaPolicy.enabledFeatures.length) app.commandLine.appendSwitch('enable-features', mediaPolicy.enabledFeatures.join(','))
+if (mediaPolicy.disabledFeatures.length) app.commandLine.appendSwitch('disable-features', mediaPolicy.disabledFeatures.join(','))
+app.on('child-process-gone', (_event, details) => {
+  if (details.type === 'GPU') mediaRuntime.record('gpu-process-gone', details)
+})
 const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow
 let processAudioCapture = null
@@ -176,6 +151,10 @@ function configureAudioBridge() {
   // The page cannot read the installed version on its own, and the app updates on a different schedule
   // than the site it loads, so both numbers have to be visible to tell a stale half from a fresh one.
   ipcMain.handle('app-version', () => app.getVersion())
+  ipcMain.handle('media-runtime-diagnostics', (event) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame || !isTrustedUrl(event.senderFrame.url)) return null
+    return mediaRuntime.snapshot()
+  })
   ipcMain.handle('window-audio-active', () => Boolean(processAudioCapture))
   ipcMain.on('window-audio-stop', stopProcessAudioCapture)
 }
@@ -202,6 +181,7 @@ function createWindow() {
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!isTrustedUrl(url)) { event.preventDefault(); if (url.startsWith('https://')) shell.openExternal(url) }
   })
+  mainWindow.webContents.on('render-process-gone', (_event, details) => mediaRuntime.record('renderer-process-gone', details))
   mainWindow.loadURL(APP_URL)
 }
 

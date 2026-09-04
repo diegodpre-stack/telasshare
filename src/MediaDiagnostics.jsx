@@ -19,13 +19,19 @@ const captureState = (streamRef) => {
     height: Number.isFinite(settings.height) ? settings.height : null,
     displaySurface: settings.displaySurface ?? null,
     logicalSurface: typeof settings.logicalSurface === 'boolean' ? settings.logicalSurface : null,
+    // Asking for a smaller frame than the screen makes the browser shrink every single frame inside
+    // the capture loop, which costs milliseconds per frame before an encoder is even involved.
+    screenWidth: Math.round((window.screen?.width || 0) * (window.devicePixelRatio || 1)) || null,
+    screenHeight: Math.round((window.screen?.height || 0) * (window.devicePixelRatio || 1)) || null,
   }
 }
 
-// An averaged frame rate hides the difference that decides where to look next. Evenly spaced frames
-// mean something is holding the source to a rate; a long tail next to a short median means the source
-// can go faster and is being interrupted. Say which one the numbers show instead of leaving it to the
-// reader, since the two lead to opposite fixes.
+// An averaged frame rate hides the difference that decides where to look next, so report the shape of
+// the arrivals rather than the average alone. A long tail beside a short median means the source can go
+// faster and something is interrupting it. Evenly spaced frames below the requested rate mean each frame
+// simply costs that long to produce — which is a throughput ceiling, not a rule being imposed. An earlier
+// version of this text called the even case an imposed limit; measurements on a 1440p screen showed the
+// gap tracking the per-frame work instead, so it now reports the cost and leaves the cause open.
 const captureVerdict = (capture) => {
   const delivered = capture.delivered
   if (!delivered) return 'Medição da fonte indisponível neste navegador.'
@@ -33,7 +39,9 @@ const captureVerdict = (capture) => {
   if (capture.grantedFps != null && delivered.fps >= capture.grantedFps - 5) return 'A fonte está entregando o que foi pedido. Quedas depois daqui vêm da codificação ou da rede.'
   if (delivered.longestGapMs != null && delivered.medianGapMs > 0 && delivered.longestGapMs > delivered.medianGapMs * 3)
     return 'Os quadros chegam em rajadas: o intervalo maior é muito acima do mediano. A fonte consegue ir mais rápido e está sendo interrompida.'
-  return 'Os quadros chegam espaçados por igual, abaixo do pedido. Isso é um limite imposto à fonte, não falta de capacidade.'
+  const rescaling = capture.width && capture.screenWidth && capture.width < capture.screenWidth
+  return `Os quadros chegam espaçados por igual: cada um custa cerca de ${capture.delivered.medianGapMs} ms para a fonte produzir, e é esse custo que fixa o teto em ${delivered.fps} FPS.`
+    + (rescaling ? ` A captura está sendo reduzida de ${capture.screenWidth}×${capture.screenHeight} para ${capture.width}×${capture.height}, e essa redução acontece a cada quadro dentro da captura.` : '')
 }
 
 export default function MediaDiagnostics({ peers, localStream }) {
@@ -113,7 +121,7 @@ export default function MediaDiagnostics({ peers, localStream }) {
     {capture && <div style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
       <strong>Captura local · {value(capture.displaySurface)}</strong>
       <p>FPS concedido pela fonte: {value(capture.grantedFps)} · FPS pedido: {value(capture.requestedFps)}<br />
-        Resolução da fonte: {value(capture.width)} × {value(capture.height)} · Estado: {value(capture.readyState)}<br />
+        Resolução da fonte: {value(capture.width)} × {value(capture.height)} · Tela: {value(capture.screenWidth)} × {value(capture.screenHeight)} · Estado: {value(capture.readyState)}<br />
         FPS realmente entregue pela fonte: {value(capture.delivered?.fps)} ({value(capture.delivered?.frames)} quadros em 2 s)<br />
         Intervalo entre quadros: menor {value(capture.delivered?.shortestGapMs, ' ms')} · mediano {value(capture.delivered?.medianGapMs, ' ms')} · maior {value(capture.delivered?.longestGapMs, ' ms')}<br />
         {captureVerdict(capture)}</p>

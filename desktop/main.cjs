@@ -198,7 +198,29 @@ function scheduleRelaunchAfterUpdate(expectedVersion) {
   if (process.platform !== 'win32') return
   const executable = Buffer.from(process.execPath, 'utf8').toString('base64')
   const version = Buffer.from(String(expectedVersion || ''), 'utf8').toString('base64')
-  const script = `$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${executable}'));$expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${version}'));Wait-Process -Id ${process.pid} -ErrorAction SilentlyContinue;Start-Sleep -Seconds 3;$deadline=(Get-Date).AddSeconds(90);while((Get-Date)-lt $deadline){if(Test-Path -LiteralPath $target){try{$installed=(Get-Item -LiteralPath $target).VersionInfo.ProductVersion;if((-not $expected) -or $installed.StartsWith($expected)){Start-Sleep -Seconds 2;break}}catch{}};Start-Sleep -Seconds 1};if(Test-Path -LiteralPath $target){Start-Process -FilePath $target}`
+  // This helper outlives the app on purpose, and that is exactly why it has to be careful about when it
+  // starts one. Three rules, each fixing a way the previous version resurrected an app nobody asked for:
+  //
+  //   $ok    — only launch if the new version is really on disk. Before, the 90 second loop could time
+  //            out with nothing installed and start the old build anyway, so a failed or cancelled
+  //            update looked like an app that refused to close.
+  //   running— never add a second copy. electron-updater is asked to relaunch as well, and the user may
+  //            have reopened the app themselves; either way this helper has nothing left to do.
+  //   waiting— bound the wait. Windows recycles process ids, so waiting on a bare id can attach to an
+  //            unrelated process and fire minutes later, at what looks like a random moment.
+  const script = [
+    `$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${executable}'))`,
+    `$expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${version}'))`,
+    `$old=Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue`,
+    `if($old){$null=$old.WaitForExit(60000)}`,
+    `Start-Sleep -Seconds 3`,
+    `$ok=[string]::IsNullOrEmpty($expected)`,
+    `$deadline=(Get-Date).AddSeconds(90)`,
+    `while(-not $ok -and (Get-Date) -lt $deadline){if(Test-Path -LiteralPath $target){try{$installed=(Get-Item -LiteralPath $target).VersionInfo.ProductVersion;if($installed.StartsWith($expected)){$ok=$true;Start-Sleep -Seconds 2}}catch{}};if(-not $ok){Start-Sleep -Seconds 1}}`,
+    `$name=[IO.Path]::GetFileNameWithoutExtension($target)`,
+    `$running=Get-Process -Name $name -ErrorAction SilentlyContinue`,
+    `if($ok -and -not $running -and (Test-Path -LiteralPath $target)){Start-Process -FilePath $target}`,
+  ].join(';')
   const encoded = Buffer.from(script, 'utf16le').toString('base64')
   const helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], { detached: true, windowsHide: true, stdio: 'ignore' })
   helper.unref()

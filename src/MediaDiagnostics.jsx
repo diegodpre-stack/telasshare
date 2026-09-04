@@ -126,6 +126,7 @@ export default function MediaDiagnostics({ peers, localStream }) {
         Resolução da fonte: {value(capture.width)} × {value(capture.height)} · Tela (CSS): {value(capture.screenWidth)} × {value(capture.screenHeight)} @ {value(capture.pixelRatio)}x · Estado: {value(capture.readyState)}<br />
         FPS realmente entregue pela fonte: {value(capture.delivered?.fps)} ({value(capture.delivered?.frames)} quadros em 2 s)<br />
         Intervalo entre quadros: menor {value(capture.delivered?.shortestGapMs, ' ms')} · mediano {value(capture.delivered?.medianGapMs, ' ms')} · maior {value(capture.delivered?.longestGapMs, ' ms')}<br />
+        Quadro: {capture.delivered?.onGpu == null ? 'indisponível' : capture.delivered.onGpu ? 'opaco, ainda na GPU' : `já na CPU, formato ${capture.delivered.frameFormat}`} · Tamanho real: {value(capture.delivered?.codedSize)}<br />
         {captureVerdict(capture)}</p>
     </div>}
     {!latest.length && <p>Aguardando uma transmissão com espectador.</p>}

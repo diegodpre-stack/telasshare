@@ -15,6 +15,11 @@ export function startCaptureRateMeter(track) {
   let intervals = []
   let previousFrame = null
   let windowStart = performance.now()
+  // A frame still held in GPU memory is opaque and reports no pixel format; one that has been read back
+  // into CPU memory reports the real layout it was converted to. That single field answers whether the
+  // capture is actually staying on the GPU, which no frame rate on its own can tell us.
+  let lastFormat
+  let lastCodedSize = null
   const drain = async () => {
     try {
       // The consumer below only stamps a time and releases the frame. It has to stay that cheap:
@@ -27,6 +32,8 @@ export function startCaptureRateMeter(track) {
         const now = performance.now()
         if (previousFrame !== null) intervals.push(now - previousFrame)
         previousFrame = now
+        lastFormat = value.format
+        lastCodedSize = Number.isFinite(value.codedWidth) ? `${value.codedWidth}×${value.codedHeight}` : null
         value.close()
       }
     } catch { /* The track can end or be replaced while a read is pending. */ }
@@ -50,6 +57,10 @@ export function startCaptureRateMeter(track) {
         shortestGapMs: at(0),
         medianGapMs: at(0.5),
         longestGapMs: sorted.length ? round(sorted[sorted.length - 1]) : null,
+        // undefined means no frame has been seen yet; null is the answer we are looking for.
+        frameFormat: lastFormat === undefined ? undefined : lastFormat,
+        onGpu: lastFormat === undefined ? null : lastFormat === null,
+        codedSize: lastCodedSize,
       }
     },
     stop() {

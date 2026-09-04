@@ -10,6 +10,21 @@ const APP_URL = 'https://telasshare.onrender.com'
 // packaged app does not, so every host candidate is dead on arrival and only the relay path survives.
 app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns')
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default')
+
+// A page cannot choose how the browser copies the screen, which is why the same site captures at very
+// different rates on different machines: measured here, a 1440p screen cost about 7.5 ms of work per
+// megapixel per frame, holding the source near 36 FPS with a game running and to 52 while idle.
+// ZeroCopyDesktopCapture keeps captured frames in GPU memory instead of copying them out to the CPU
+// and back. Chromium ships it off by default while it rolls out, and the packaged app is the only
+// place we can ask for it — a browser tab has no say over its own command line.
+//
+// Verified present in this Electron's Chromium (152) before being added here: a feature name that does
+// not exist is ignored without a word, which would look exactly like a change that did not help.
+// It is still experimental. ENTRETELAS_GPU_CAPTURE=0 turns it off without a new build, so a machine
+// where it misbehaves is not stuck with a broken capture.
+if (process.env.ENTRETELAS_GPU_CAPTURE !== '0') {
+  app.commandLine.appendSwitch('enable-features', 'ZeroCopyDesktopCapture')
+}
 const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow
 let processAudioCapture = null

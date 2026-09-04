@@ -19,10 +19,13 @@ const captureState = (streamRef) => {
     height: Number.isFinite(settings.height) ? settings.height : null,
     displaySurface: settings.displaySurface ?? null,
     logicalSurface: typeof settings.logicalSurface === 'boolean' ? settings.logicalSurface : null,
-    // Asking for a smaller frame than the screen makes the browser shrink every single frame inside
-    // the capture loop, which costs milliseconds per frame before an encoder is even involved.
-    screenWidth: Math.round((window.screen?.width || 0) * (window.devicePixelRatio || 1)) || null,
-    screenHeight: Math.round((window.screen?.height || 0) * (window.devicePixelRatio || 1)) || null,
+    // Reported as the browser sees it, in CSS pixels plus the ratio, rather than multiplied into a
+    // guess at the physical size. On a scaled Windows display the packaged app reported a ratio of 1
+    // for a 1440p screen, so that multiplication produced 1920x1080 for a monitor capturing at
+    // 2560x1440 — a number that looked authoritative and was simply wrong.
+    screenWidth: window.screen?.width || null,
+    screenHeight: window.screen?.height || null,
+    pixelRatio: window.devicePixelRatio || null,
   }
 }
 
@@ -39,9 +42,8 @@ const captureVerdict = (capture) => {
   if (capture.grantedFps != null && delivered.fps >= capture.grantedFps - 5) return 'A fonte está entregando o que foi pedido. Quedas depois daqui vêm da codificação ou da rede.'
   if (delivered.longestGapMs != null && delivered.medianGapMs > 0 && delivered.longestGapMs > delivered.medianGapMs * 3)
     return 'Os quadros chegam em rajadas: o intervalo maior é muito acima do mediano. A fonte consegue ir mais rápido e está sendo interrompida.'
-  const rescaling = capture.width && capture.screenWidth && capture.width < capture.screenWidth
-  return `Os quadros chegam espaçados por igual: cada um custa cerca de ${capture.delivered.medianGapMs} ms para a fonte produzir, e é esse custo que fixa o teto em ${delivered.fps} FPS.`
-    + (rescaling ? ` A captura está sendo reduzida de ${capture.screenWidth}×${capture.screenHeight} para ${capture.width}×${capture.height}, e essa redução acontece a cada quadro dentro da captura.` : '')
+  return `Os quadros chegam espaçados por igual: cada um custa cerca de ${delivered.medianGapMs} ms para a fonte produzir, e é esse custo que fixa o teto em ${delivered.fps} FPS.`
+    + (delivered.longestGapMs > delivered.medianGapMs * 1.8 ? ` O intervalo maior chegou a ${delivered.longestGapMs} ms, então há travadas ocasionais somadas a esse custo.` : '')
 }
 
 export default function MediaDiagnostics({ peers, localStream }) {
@@ -121,7 +123,7 @@ export default function MediaDiagnostics({ peers, localStream }) {
     {capture && <div style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
       <strong>Captura local · {value(capture.displaySurface)}</strong>
       <p>FPS concedido pela fonte: {value(capture.grantedFps)} · FPS pedido: {value(capture.requestedFps)}<br />
-        Resolução da fonte: {value(capture.width)} × {value(capture.height)} · Tela: {value(capture.screenWidth)} × {value(capture.screenHeight)} · Estado: {value(capture.readyState)}<br />
+        Resolução da fonte: {value(capture.width)} × {value(capture.height)} · Tela (CSS): {value(capture.screenWidth)} × {value(capture.screenHeight)} @ {value(capture.pixelRatio)}x · Estado: {value(capture.readyState)}<br />
         FPS realmente entregue pela fonte: {value(capture.delivered?.fps)} ({value(capture.delivered?.frames)} quadros em 2 s)<br />
         Intervalo entre quadros: menor {value(capture.delivered?.shortestGapMs, ' ms')} · mediano {value(capture.delivered?.medianGapMs, ' ms')} · maior {value(capture.delivered?.longestGapMs, ' ms')}<br />
         {captureVerdict(capture)}</p>

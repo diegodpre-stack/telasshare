@@ -37,8 +37,17 @@ const processAudioAvailable = () => process.platform === 'win32' && fs.existsSyn
 
 function stopProcessAudioCapture() {
   if (!processAudioCapture) return
-  processAudioCapture.kill()
+  const capture = processAudioCapture
   processAudioCapture = null
+  capture.kill()
+  // Windows has no signals: kill() terminates the helper itself and nothing it may have started, and a
+  // surviving grandchild holds the stdio pipes open, which keeps this process from ever finishing its
+  // own shutdown. taskkill /T takes the whole tree. Best effort — the kill() above already covers the
+  // ordinary case, and the app must not wait on this to exit.
+  if (process.platform === 'win32' && capture.pid) {
+    try { spawn('taskkill', ['/pid', String(capture.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', detached: true }).unref() }
+    catch { /* the direct kill above stands */ }
+  }
 }
 
 function startProcessAudioCapture(source) {
@@ -220,6 +229,7 @@ function showUpdateReady(updateInfo) {
     event.preventDefault()
     const action = url.slice('entretelas-update:'.length)
     if (action === 'install') {
+      installingUpdate = true
       updateWindow?.webContents.executeJavaScript('window.showInstalling()').catch(() => {})
       scheduleRelaunchAfterUpdate(updateInfo?.version)
       setTimeout(() => autoUpdater.quitAndInstall(true, true), 1_800)
@@ -256,9 +266,38 @@ function configureUpdates() {
   mainWindow.on('closed', () => clearInterval(timer))
 }
 
+// Closing the window has to end the process, every time. app.quit() only asks: it fires the quit events,
+// waits for every window to close and then for the event loop to drain, and anything still holding a
+// handle — a modal nobody destroyed, a pipe to a helper that outlived its kill, a renderer that will not
+// come down — leaves the app running with nothing on screen and a live entry in Task Manager.
+//
+// So do the asking properly first, then stop asking. Destroy the windows outright rather than closing
+// them, kill the helpers, and if the process is somehow still here a moment later, exit it. The window
+// is already gone by then; there is nothing left to protect by waiting.
+let shuttingDown = false
+let installingUpdate = false
+function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
+  stopProcessAudioCapture()
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.destroy()
+  }
+  // The updater spawns the real installer as a separate detached process and needs this one to leave,
+  // so the deadline helps it rather than interrupting it. Give it longer regardless, since it has more
+  // to hand over than a normal close.
+  // Deliberately not unref'd. An unref'd timer is not guaranteed to fire once nothing else is holding
+  // the loop, and this one has to fire in exactly the case where it matters. Holding the loop for its
+  // own deadline costs nothing: that is the same wait either way.
+  setTimeout(() => app.exit(0), installingUpdate ? 10_000 : 2_000)
+}
+
 if (!app.requestSingleInstanceLock()) app.quit()
 else {
   app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus() } })
   app.whenReady().then(() => { configureSession(); configureAudioBridge(); createWindow(); configureUpdates() })
-  app.on('window-all-closed', () => { stopProcessAudioCapture(); app.quit() })
+  app.on('window-all-closed', () => { shutdown(); app.quit() })
+  // Also covers quitting by any other route: the taskbar menu, Alt+F4 on the last window, a signal, or
+  // the updater restarting the app.
+  app.on('before-quit', shutdown)
 }

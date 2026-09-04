@@ -25,13 +25,14 @@
 .remote-frame{position:relative}
 .global-actions{position:fixed;z-index:12;right:18px;bottom:18px;display:flex;align-items:stretch;gap:8px}.global-actions button{box-shadow:0 14px 45px #0008;backdrop-filter:blur(10px)}.global-actions .friend-site-button{background:#112235ed}.app-download-button{display:flex;align-items:center;gap:9px;padding:9px 13px;border:1px solid #3b7868;background:#102e28ed;color:#dff9f1;border-radius:11px}.app-download-button>svg{color:#49e0b4}.app-download-button>span,.app-download-button strong,.app-download-button small{display:block;text-align:left}.app-download-button strong{font-size:11px}.app-download-button small{font-size:9px;color:#7fb6a7;margin-top:2px}.app-download-button:hover{transform:translateY(-2px);border-color:#59d8b5;background:#133b32}.download-options{display:grid;grid-template-columns:1fr;gap:8px;margin-top:20px}.download-options button{width:100%;margin:0;padding:11px 10px}.download-modal>p strong{color:#dceaf5}html[data-desktop=true] .app-download-button{display:none}@media(max-width:680px){.global-actions{right:12px;bottom:12px;left:12px}.global-actions>button{flex:1}.global-actions .friend-site-button span{display:none}.shell{padding-bottom:100px}}
 
-/* Left, not right: the bottom-right corner already carries two buttons. */
+/* Left, not right: .global-actions holds two buttons in the right corner. It also sits at z-index 12,
+   so a lower stamp there was drawn behind them and read as missing rather than hidden. */
 .build-stamp {
   position: fixed;
   left: 10px;
   bottom: 8px;
   margin: 0;
-  z-index: 5;
+  z-index: 13;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   letter-spacing: .02em;
@@ -41,4 +42,9 @@
   border-radius: 5px;
   padding: 2px 7px;
   pointer-events: none;
+}
+
+/* Under 680px .global-actions stretches across the bottom, so the left corner is taken as well. */
+@media (max-width: 680px) {
+  .build-stamp { bottom: 76px; }
 }

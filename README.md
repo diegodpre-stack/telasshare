@@ -8,7 +8,7 @@ O áudio depende da origem e do navegador: uma aba pode fornecer apenas o própr
 
 O cliente envia um heartbeat de sinalização a cada 20 segundos. Se o WebSocket cair por oscilação de rede ou substituição da instância no Render, ele reconecta com espera progressiva sem encerrar imediatamente as tracks e conexões WebRTC. O identificador da sessão permanece estável durante a reconexão, permitindo que a negociação e a recuperação do ICE continuem.
 
-Usuários comuns entram no site apenas escolhendo um nome. O botão **ADM** revela o campo de senha administrativa. O lobby atualiza automaticamente e mostra somente os nomes das salas disponíveis; participantes, presença, transmissões e sinalização WebRTC só ficam disponíveis após a senha da sala ser validada. Salas que permanecem vazias por 15 segundos são removidas. `ADMIN_PASSWORD_1` é o único SUPER ADM e pode entrar em qualquer sala; os outros administradores precisam da senha da sala como qualquer usuário. Dentro dela, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores.
+Usuários comuns entram no site apenas escolhendo um nome. O lobby atualiza automaticamente e mostra somente os nomes das salas disponíveis; participantes, presença, transmissões e sinalização WebRTC só ficam disponíveis após a senha da sala ser validada. Salas que permanecem vazias por 15 segundos são removidas. Dentro dela, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores.
 
 ## Requisitos
 
@@ -86,13 +86,11 @@ npm run desktop:dist
 
 ### Salas privadas
 
-O Blueprint gera `SESSION_SECRET` automaticamente. Não existe senha geral para usuários comuns: basta escolher um nome. Depois desse login, o lobby mostra os nomes das salas, mas não mostra participantes nem transmissões. Qualquer usuário pode criar uma sala e escolher sua senha; os amigos clicam nela e informam essa senha para entrar. O login fica salvo no navegador por até 30 dias. O servidor limita tentativas administrativas incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.
+O Blueprint gera `SESSION_SECRET` automaticamente. Não existe senha geral para usuários comuns: basta escolher um nome. Depois desse login, o lobby mostra os nomes das salas, mas não mostra participantes nem transmissões. Qualquer usuário pode criar uma sala e escolher sua senha; os amigos clicam nela e informam essa senha para entrar. O login fica salvo no navegador por até 30 dias. O servidor limita tentativas de login incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.
 
 As salas ficam somente na memória nesta versão. Se o Render reiniciar ou adormecer o serviço gratuito, elas desaparecem e precisam ser criadas novamente; a interface descartará a sessão antiga na próxima tentativa. As senhas são armazenadas em memória com `scrypt`, salt individual e nunca são enviadas para outros participantes.
 
-Nunca coloque `SESSION_SECRET`, senhas administrativas nem o arquivo `.env` no Git.
-
-Defina `ADMIN_PASSWORD_1` até `ADMIN_PASSWORD_4` no Render. A primeira senha é exclusiva do SUPER ADM e deve ficar somente com o proprietário; ela permite entrar em qualquer sala sem a senha. As outras três concedem moderação, mas não permitem entrar em uma sala sem sua senha.
+Nunca coloque `SESSION_SECRET` nem o arquivo `.env` no Git.
 
 1. Publique o frontend com HTTPS e defina `VITE_SIGNAL_URL=wss://seu-dominio-de-sinalizacao` antes de `npm run build`.
 2. Publique o servidor Node em uma hospedagem que aceite WebSocket e configure `CLIENT_ORIGIN=https://seu-frontend`.

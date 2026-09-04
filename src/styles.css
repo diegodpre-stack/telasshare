@@ -50,3 +50,15 @@
 }
 
 .segmented.five{grid-template-columns:repeat(5,1fr);margin-bottom:8px}
+
+/* The start button used to live at the bottom of the settings sidebar, below every control, where it
+   had to be scrolled to. It is the one action on this screen, so it sits above the workspace and is
+   replaced by the live banner in the same place once a broadcast is running. */
+.start-broadcast.standalone {
+  width: 100%;
+  margin: 18px 0 0;
+  padding: 16px;
+  font-size: 14px;
+  gap: 9px;
+  border-radius: 14px;
+}

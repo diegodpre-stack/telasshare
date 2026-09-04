@@ -24,8 +24,10 @@ const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
 const defaultSignalHost = localHost ? `${location.hostname}:8787` : location.host
 const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${defaultSignalHost}`
 const resolutions = { auto: { label: 'Auto' }, '720p': { label: '720p', width: 1280, height: 720 }, '1080p': { label: '1080p', width: 1920, height: 1080 }, '1440p': { label: '1440p', width: 2560, height: 1440 } }
-const bitratePresets = { low: 2_500_000, medium: 8_000_000, high: 14_000_000 }
-const bitrateLabels = { low: 'Baixa', medium: 'Média', high: 'Alta', custom: 'Personalizada' }
+// A ceiling, not a target: WebRTC never sends more than its bandwidth estimate allows, so this only
+// decides how much room there is when the connection turns out to be good. Picking it was a question
+// nobody could answer without measuring, and the wrong answer quietly capped a healthy connection.
+const MAX_BITRATE_PER_VIEWER = 20_000_000
 const roleRanks = { member: 0, owner: 1, admin: 2, superadmin: 3 }
 const defaultStunUrls = 'stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:stun2.l.google.com:19302,stun:stun.nextcloud.com:443'
 const staticIceServers = () => {
@@ -277,8 +279,6 @@ export default function App() {
   const [resolution, setResolution] = useState('1080p')
   const [fps, setFps] = useState(60)
   const [preferredCodec, setPreferredCodec] = useState('auto')
-  const [quality, setQuality] = useState('medium')
-  const [customMbps, setCustomMbps] = useState(8)
   const [screenSize, setScreenSize] = useState('medium')
   const [watchMode, setWatchMode] = useState('auto')
   const [shareAudio, setShareAudio] = useState(true)
@@ -293,7 +293,7 @@ export default function App() {
   const localStreamRef = useRef(null)
   const statsRef = useRef(new Map())
   const knownUsersRef = useRef(null)
-  const transmissionSettingsRef = useRef({ fps, maxBitrate: bitratePresets[quality], scaleResolutionDownBy: 1 })
+  const transmissionSettingsRef = useRef({ fps, maxBitrate: MAX_BITRATE_PER_VIEWER, scaleResolutionDownBy: 1 })
   const captureSettingsQueue = useRef(Promise.resolve())
   // shareWith runs from the socket handler, which closed over an older render, so the current choice
   // has to travel in a ref the way the transmission settings already do.
@@ -310,9 +310,9 @@ export default function App() {
   }, [])
   const readTransmissionSettings = useCallback(() => ({
     fps,
-    maxBitrate: quality === 'custom' ? Math.round(customMbps * 1_000_000) : bitratePresets[quality],
+    maxBitrate: MAX_BITRATE_PER_VIEWER,
     scaleResolutionDownBy: senderScaleFor(resolutions[resolution].height),
-  }), [fps, quality, customMbps, resolution, senderScaleFor])
+  }), [fps, resolution, senderScaleFor])
   useEffect(() => {
     transmissionSettingsRef.current = readTransmissionSettings()
     for (const entry of pcsRef.current.values()) entry.configureSender?.()
@@ -326,6 +326,25 @@ export default function App() {
     })
   }, [fps, resolution, readTransmissionSettings])
   const send = useCallback((message) => { if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message)) }, [])
+
+  // One sweep across every peer we are transmitting to, only while the preview panel that shows the
+  // result is open. Closing it stops the sampling; the numbers resume from the next sweep.
+  useEffect(() => {
+    if (!showSelfPreview) return
+    const carries = new Map()
+    let disposed = false
+    const sweep = async () => {
+      for (const [connectionId, entry] of pcsRef.current) {
+        if (disposed) return
+        if (entry.role !== 'transmitter') continue
+        if (!carries.has(connectionId)) carries.set(connectionId, {})
+        await collectRouteStatsRef.current(connectionId, entry.pc, carries.get(connectionId))()
+      }
+    }
+    sweep()
+    const timer = setInterval(sweep, 1000)
+    return () => { disposed = true; clearInterval(timer) }
+  }, [showSelfPreview])
 
   const closeConnection = useCallback((connectionId, notify = false) => {
     const entry = pcsRef.current.get(connectionId)
@@ -475,12 +494,17 @@ export default function App() {
     statsRef.current.set(connectionId, timer)
   }, [])
 
-  const startRouteStats = (connectionId, pc) => {
-    let previousFrames = null; let previousBytes = null; let previousAt = null
+  // Everything this produces is read in one place: the "Ver minha transmissão" panel. It used to run a
+  // getStats() sweep every second, for every viewer, for the whole broadcast — the heaviest sampling left
+  // in the app, on the machine already doing the capturing and encoding, to keep a line of text current
+  // that nobody was looking at. Now it runs while that panel is open and not otherwise.
+  const collectRouteStatsRef = useRef(null)
+  const collectRouteStats = (connectionId, pc, carry) => {
     const inspect = async () => {
       try {
         const stats = await pc.getStats()
         let pair = null; let outboundFps = null; let limitation = null; let sentMbps = null
+        let { previousFrames = null, previousBytes = null, previousAt = null } = carry
         stats.forEach((report) => {
           if (report.type === 'transport' && report.selectedCandidatePairId) pair = stats.get(report.selectedCandidatePairId)
           if (!pair && report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) pair = report
@@ -493,6 +517,7 @@ export default function App() {
               sentMbps = Math.round(((report.bytesSent - previousBytes) * 8 / elapsed / 1000) * 10) / 10
             }
             if (Number.isFinite(report.framesEncoded) && Number.isFinite(report.bytesSent)) { previousFrames = report.framesEncoded; previousBytes = report.bytesSent; previousAt = report.timestamp }
+            Object.assign(carry, { previousFrames, previousBytes, previousAt })
           }
         })
         if (!pair) return
@@ -504,10 +529,9 @@ export default function App() {
         setViewers((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], route, protocol, rttMs, availableMbps, sentMbps, limitation, ...(Number.isFinite(outboundFps) ? { fps: outboundFps } : {}) } } : current)
       } catch { /* route statistics are optional on older browsers */ }
     }
-    inspect()
-    const timer = setInterval(inspect, 1000)
-    statsRef.current.set(connectionId, timer)
+    return inspect
   }
+  collectRouteStatsRef.current = collectRouteStats
 
   const handleSignal = useCallback(async (message) => {
     let entry, phase = 'create-receiver'
@@ -784,7 +808,7 @@ export default function App() {
       offer.sdp = withStartBitrate(offer.sdp, Math.min(2500, Math.round(settings.maxBitrate / 1000 / 4)))
       phase = 'set-local-offer'
       await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, turnTransport: entry.turnTransport, description: entry.pc.localDescription })
-      setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); startRouteStats(connectionId, entry.pc); setNotice('Novo espectador conectado à sua transmissão.')
+      setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); setNotice('Novo espectador conectado à sua transmissão.')
     } catch (error) {
       recordPeerFailure(phase, error, entry?.pc)
       if (entry) closeConnection(connectionId)
@@ -813,6 +837,7 @@ export default function App() {
     {diagnosticsEnabled && <MediaDiagnostics peers={pcsRef} localStream={localStreamRef} />}
     <BuildStamp />
     {showSelfPreview && localStreamRef.current && <SelfPreview stream={localStreamRef.current} routeLabel={routeLabel} outboundFpsLabel={outboundFpsLabel} onClose={() => setShowSelfPreview(false)} />}
+    {!localStreamRef.current && <button className="start-broadcast standalone" onClick={startBroadcast}><Radio size={18} />Iniciar transmissão</button>}
     {localStreamRef.current && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {resolutions[resolution].label} · preferência {fps} FPS · {audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={() => setShowSelfPreview(true)}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
@@ -821,7 +846,7 @@ export default function App() {
     <div className={`workspace multi-workspace${showPeople ? '' : ' people-hidden'}`}>
       {showPeople && <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length + 1}</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Compartilhe o nome e a senha desta sala com seus amigos.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions"><button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>{isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>}
       <section className="panel stage multi-stage"><div className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>
-      <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented three">{[30, 60, 120].map((value) => <button type="button" className={fps === value ? 'selected' : ''} key={value} onClick={() => setFps(value)}>{value}</button>)}</div><p className="hint">120 FPS é uma preferência. O navegador, tela e GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p><label>Bitrate por espectador</label><div className="quality-list">{Object.keys(bitrateLabels).map((key) => <button type="button" className={quality === key ? 'selected' : ''} key={key} onClick={() => setQuality(key)}><span>{bitrateLabels[key]}</span><small>{key === 'low' ? '2,5 Mbps' : key === 'medium' ? '8 Mbps' : key === 'high' ? '14 Mbps' : 'defina abaixo'}</small></button>)}</div>{quality === 'custom' && <label className="custom">Mbps<input type="number" min="0.5" max="100" step="0.5" value={customMbps} onChange={(event) => setCustomMbps(Math.min(100, Math.max(.5, Number(event.target.value))))} /></label>}<p className="hint">Sugestão: 720p30: 2,5–4 Mbps · 1080p30: 4–6 Mbps · 1080p60: 6–10 Mbps (8 recomendado) · 1440p60: 10–16 Mbps (14 recomendado). Valores maiores usam mais internet e podem causar travamentos se a conexão não acompanhar.</p></fieldset>{!localStreamRef.current && <button className="start-broadcast" onClick={startBroadcast}><Radio size={17} />Iniciar transmissão</button>}<div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
+      <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented"><button type="button" className={fps === 30 ? 'selected' : ''} onClick={() => setFps(30)}>30</button><button type="button" className={fps === 60 ? 'selected' : ''} onClick={() => setFps(60)}>60</button></div><p className="hint">É uma preferência. O navegador, a tela e a GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p></fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
     </div>
   </main>
 }

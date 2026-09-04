@@ -165,6 +165,9 @@ function configureSession() {
 }
 
 function configureAudioBridge() {
+  // The page cannot read the installed version on its own, and the app updates on a different schedule
+  // than the site it loads, so both numbers have to be visible to tell a stale half from a fresh one.
+  ipcMain.handle('app-version', () => app.getVersion())
   ipcMain.handle('window-audio-active', () => Boolean(processAudioCapture))
   ipcMain.on('window-audio-stop', stopProcessAudioCapture)
 }

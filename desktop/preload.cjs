@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('electronAPI', Object.freeze({
   isDesktop: true,
+  getAppVersion: () => ipcRenderer.invoke('app-version'),
   isWindowAudioActive: () => ipcRenderer.invoke('window-audio-active'),
   onWindowAudioData: (callback) => {
     const listener = (_event, data) => callback(data)

@@ -6,9 +6,14 @@ const path = require('node:path')
 
 const APP_URL = 'https://telasshare.onrender.com'
 
-// Chromium hides host candidates behind .local mDNS names. A browser resolves its own names, but the
-// packaged app does not, so every host candidate is dead on arrival and only the relay path survives.
-app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns')
+// Chromium reads each of these switches once, so every feature has to travel in a single list. Adding
+// a second appendSwitch for the same switch name silently replaces the first.
+const disabledFeatures = [
+  // Chromium hides host candidates behind .local mDNS names. A browser resolves its own names, but the
+  // packaged app does not, so every host candidate is dead on arrival and only the relay path survives.
+  'WebRtcHideLocalIpsWithMdns',
+]
+const enabledFeatures = []
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default')
 
 // A page cannot choose how the browser copies the screen, which is why the same site captures at very
@@ -18,13 +23,24 @@ app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default')
 // and back. Chromium ships it off by default while it rolls out, and the packaged app is the only
 // place we can ask for it — a browser tab has no say over its own command line.
 //
-// Verified present in this Electron's Chromium (152) before being added here: a feature name that does
-// not exist is ignored without a word, which would look exactly like a change that did not help.
-// It is still experimental. ENTRETELAS_GPU_CAPTURE=0 turns it off without a new build, so a machine
-// where it misbehaves is not stuck with a broken capture.
+// Keeping frames on the GPU during capture only pays off if nothing downstream drags them back, and a
+// software encoder does exactly that: it needs the pixels in CPU memory. Chromium was picking
+// MediaFoundationSoftwareVideoEncoder here even though the GPU reports a hardware encoder available.
+// ForceSoftwareForRtcLowResolutions, on by default outside Android, pins a call to a software encoder
+// while the picture is small. A broadcast starts small on purpose — bandwidth estimation opens around
+// 0.3 Mbps and the encoder picks a matching size — so the decision is taken at the one moment the
+// answer is guaranteed to be "small", and the resolution climbing afterwards does not revisit it.
+//
+// Every name here was checked against this Electron's Chromium (152) first: an unknown feature is
+// ignored without a word, which looks exactly like a change that did not help. A second candidate,
+// MediaFoundationSharedImageEncode, exists only on Chromium main and was left out for that reason.
+// Both are experimental, so ENTRETELAS_GPU_CAPTURE=0 turns them off without needing a new build.
 if (process.env.ENTRETELAS_GPU_CAPTURE !== '0') {
-  app.commandLine.appendSwitch('enable-features', 'ZeroCopyDesktopCapture')
+  enabledFeatures.push('ZeroCopyDesktopCapture')
+  disabledFeatures.push('ForceSoftwareForRtcLowResolutions')
 }
+if (enabledFeatures.length) app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','))
+if (disabledFeatures.length) app.commandLine.appendSwitch('disable-features', disabledFeatures.join(','))
 const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow
 let processAudioCapture = null

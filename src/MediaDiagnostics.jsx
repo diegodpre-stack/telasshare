@@ -65,8 +65,10 @@ export default function MediaDiagnostics({ peers }) {
       <strong>{row.connection} · {row.direction} · {row.route || row.state}</strong>
       <p>{value(row.width)} × {value(row.height)} · {value(row.fps, ' FPS')} · {value(row.mbps, ' Mbps')}<br />
         Codec: {value(row.codec)} · Limitação: {value(row.limitation)} · {row.direction === 'envio' ? 'Codificação' : 'Decodificação'}: {value(row.frameProcessingMs, ' ms/quadro')}<br />
+        Implementação: {value(row.encoderImplementation ?? row.decoderImplementation)} · Encoder eficiente informado: {row.powerEfficientEncoder == null ? 'indisponível' : row.powerEfficientEncoder ? 'sim' : 'não'}<br />
         Captura (quando informada): {value(row.captureFps, ' FPS')} · Ping: {value(row.rttMs, ' ms')} · Banda estimada: {value(row.availableMbps, ' Mbps')}<br />
         ICE: {value(row.iceProtocol)} · Transporte até TURN local: {value(row.localRelayProtocol)}<br />
+        Candidato local: {value(row.localCandidateType)} · Remoto: {value(row.remoteCandidateType)}<br />
         Pacotes perdidos acumulados: {value(row.packetsLostTotal)} · Pedidos de retransmissão no intervalo: {value(row.nackInterval)}</p>
     </div>)}
   </details>

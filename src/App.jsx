@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MediaDiagnostics from './MediaDiagnostics.jsx'
-import { buildIceConfiguration } from './icePolicy.js'
+import { buildIceConfiguration, initialIceStage } from './icePolicy.js'
 import { applySenderSettings } from './senderSettings.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
@@ -283,10 +283,10 @@ export default function App() {
   }, [broadcasting, viewers, stopSharing])
 
   const createPeer = useCallback((connectionId, peerId, role, mode = 'auto') => {
-    const pc = new RTCPeerConnection(buildIceConfiguration(iceServersRef.current, mode === 'turn' ? 'udp' : 'direct', mode === 'turn'))
+    const pc = new RTCPeerConnection(buildIceConfiguration(iceServersRef.current, initialIceStage(mode), mode === 'turn'))
     const entry = { pc, peerId, role, mode, pendingCandidates: earlyCandidatesRef.current.get(connectionId) || [], disconnectTimer: null, restarting: false, settled: false }; earlyCandidatesRef.current.delete(connectionId); pcsRef.current.set(connectionId, entry)
     entry.iceDiagnostics = { gathered: 0, received: entry.pendingCandidates.length, applied: 0, rejected: 0, errors: [] }
-    entry.turnTransport = mode === 'turn' ? 'udp' : 'direct'
+    entry.turnTransport = initialIceStage(mode)
     pc.onicecandidateerror = (event) => {
       // Never store candidate addresses, URLs, SDP, or error text (may contain IPs).
       entry.iceDiagnostics.errors.push({ time: Date.now(), code: event.errorCode })
@@ -321,7 +321,15 @@ export default function App() {
         clearTimeout(entry.fallbackTimer); entry.fallbackTimer = null
         entry.restarting = false; entry.settled = true
       }
-      if (pc.iceConnectionState === 'failed') role === 'transmitter' ? entry.restart() : send({ type: 'restart-request', to: peerId, connectionId })
+      if (pc.iceConnectionState === 'failed') {
+        if (role === 'transmitter') {
+          entry.settled = false
+          entry.restart()
+          // Success cleared the initial timer. Recovery also needs a bounded
+          // attempt; otherwise subsequent failures never reach fallback again.
+          if (!entry.fallbackTimer) entry.fallbackTimer = setTimeout(advanceFallback, 30_000)
+        } else send({ type: 'restart-request', to: peerId, connectionId })
+      }
       if (pc.iceConnectionState === 'disconnected' && !entry.disconnectTimer) entry.disconnectTimer = setTimeout(() => {
         entry.disconnectTimer = null
         if (pc.iceConnectionState === 'disconnected') role === 'transmitter' ? entry.restart() : send({ type: 'restart-request', to: peerId, connectionId })
@@ -351,7 +359,7 @@ export default function App() {
         failConnection()
       }
     }
-    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, mode === 'turn' ? 15000 : 30000)
+    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, 30_000)
     return entry
   }, [closeConnection, send])
 
@@ -442,10 +450,10 @@ export default function App() {
         setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, waiting: false, stream: null, hasAudio: false } }))
       }
       if (message.description) {
-        if (message.description.type === 'offer' && message.mode === 'turn') {
-          entry.mode = 'turn'; entry.autoFallback = message.allowDirect === true
-          entry.turnTransport = message.turnTransport === 'udp' ? 'udp' : 'all'
-          entry.pc.setConfiguration(buildIceConfiguration(iceServersRef.current, entry.turnTransport, !entry.autoFallback, entry.pc.getConfiguration()))
+        if (message.description.type === 'offer' && ['auto', 'turn', 'p2p'].includes(message.mode)) {
+          entry.mode = message.mode; entry.autoFallback = message.mode === 'auto' || message.allowDirect === true
+          entry.turnTransport = message.mode === 'p2p' ? 'direct' : ['direct', 'udp', 'all'].includes(message.turnTransport) ? message.turnTransport : initialIceStage(message.mode)
+          entry.pc.setConfiguration(buildIceConfiguration(iceServersRef.current, entry.turnTransport, message.mode === 'turn' && !entry.autoFallback, entry.pc.getConfiguration()))
         }
         await entry.pc.setRemoteDescription(message.description)
         if (message.description.type === 'answer') { entry.restarting = false; await entry.configureSender?.() }

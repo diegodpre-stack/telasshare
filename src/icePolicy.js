@@ -1,4 +1,8 @@
 // No candidate pool by default: peers are created immediately before negotiation.
+// Gather direct and UDP relay candidates together in automatic mode. ICE still has
+// direct routes available; TCP is withheld until a later, unsuccessful attempt.
+export const initialIceStage = (mode) => mode === 'p2p' ? 'direct' : 'udp'
+
 // Preserve immutable options when changing stages on an existing connection.
 export function buildIceConfiguration(servers, stage, relayOnly = false, current = {}) {
   return { ...current, iceServers: selectIceServers(servers, stage), iceTransportPolicy: relayOnly ? 'relay' : 'all' }

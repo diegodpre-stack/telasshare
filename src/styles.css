@@ -48,3 +48,5 @@
 @media (max-width: 680px) {
   .build-stamp { bottom: 76px; }
 }
+
+.segmented.five{grid-template-columns:repeat(5,1fr);margin-bottom:8px}

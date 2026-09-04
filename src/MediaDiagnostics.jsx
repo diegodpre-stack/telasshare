@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { summarizeStats } from './mediaDiagnostics.js'
+import { startCaptureRateMeter } from './captureRate.js'
 
 // What the capture track actually granted, which is not what we asked for. A source pinned to 30 FPS
 // caps the whole broadcast before a single frame reaches an encoder, and no sender setting can lift it.
@@ -21,10 +22,25 @@ const captureState = (streamRef) => {
   }
 }
 
+// An averaged frame rate hides the difference that decides where to look next. Evenly spaced frames
+// mean something is holding the source to a rate; a long tail next to a short median means the source
+// can go faster and is being interrupted. Say which one the numbers show instead of leaving it to the
+// reader, since the two lead to opposite fixes.
+const captureVerdict = (capture) => {
+  const delivered = capture.delivered
+  if (!delivered) return 'Medição da fonte indisponível neste navegador.'
+  if (!delivered.frames) return 'Nenhum quadro entregue neste intervalo. Uma tela totalmente parada faz isso normalmente.'
+  if (capture.grantedFps != null && delivered.fps >= capture.grantedFps - 5) return 'A fonte está entregando o que foi pedido. Quedas depois daqui vêm da codificação ou da rede.'
+  if (delivered.longestGapMs != null && delivered.medianGapMs > 0 && delivered.longestGapMs > delivered.medianGapMs * 3)
+    return 'Os quadros chegam em rajadas: o intervalo maior é muito acima do mediano. A fonte consegue ir mais rápido e está sendo interrompida.'
+  return 'Os quadros chegam espaçados por igual, abaixo do pedido. Isso é um limite imposto à fonte, não falta de capacidade.'
+}
+
 export default function MediaDiagnostics({ peers, localStream }) {
   const history = useRef([])
   const [latest, setLatest] = useState([])
   const [capture, setCapture] = useState(null)
+  const meter = useRef(null)
   useEffect(() => {
     let disposed = false, busy = false, sequence = 0
     const states = new Map()
@@ -60,6 +76,12 @@ export default function MediaDiagnostics({ peers, localStream }) {
         }
         for (const id of states.keys()) if (!peers.current.has(id)) states.delete(id)
         const source = captureState(localStream)
+        const track = localStream?.current?.getVideoTracks?.()[0] || null
+        if (meter.current?.track !== track) {
+          meter.current?.instance?.stop()
+          meter.current = track ? { track, instance: startCaptureRateMeter(track) } : null
+        }
+        if (source) source.delivered = meter.current?.instance?.read() ?? null
         if (!disposed) {
           setLatest(rows)
           setCapture(source)
@@ -72,7 +94,10 @@ export default function MediaDiagnostics({ peers, localStream }) {
       } finally { busy = false }
     }
     const timer = setInterval(sample, 2000)
-    return () => { disposed = true; clearInterval(timer) }
+    return () => {
+      disposed = true; clearInterval(timer)
+      meter.current?.instance?.stop(); meter.current = null
+    }
   }, [peers, localStream])
   const download = () => {
     const blob = new Blob([JSON.stringify({ schema: 1, generatedAt: new Date().toISOString(), sampleIntervalMs: 2000, note: 'null = indisponível; perda total é cumulativa; relayProtocol é apenas do cliente local; FPS de captura vem de media-source, não da prévia.', samples: history.current }, null, 2)], { type: 'application/json' })
@@ -89,9 +114,9 @@ export default function MediaDiagnostics({ peers, localStream }) {
       <strong>Captura local · {value(capture.displaySurface)}</strong>
       <p>FPS concedido pela fonte: {value(capture.grantedFps)} · FPS pedido: {value(capture.requestedFps)}<br />
         Resolução da fonte: {value(capture.width)} × {value(capture.height)} · Estado: {value(capture.readyState)}<br />
-        {capture.grantedFps != null && capture.requestedFps != null && capture.grantedFps < capture.requestedFps - 1
-          ? 'A fonte concedeu menos FPS do que o pedido. Esse é o teto da transmissão: nenhum ajuste de codec ou bitrate passa dele.'
-          : 'A fonte aceitou o FPS pedido. Quedas abaixo disso vêm da codificação ou da rede, não da captura.'}</p>
+        FPS realmente entregue pela fonte: {value(capture.delivered?.fps)} ({value(capture.delivered?.frames)} quadros em 2 s)<br />
+        Intervalo entre quadros: menor {value(capture.delivered?.shortestGapMs, ' ms')} · mediano {value(capture.delivered?.medianGapMs, ' ms')} · maior {value(capture.delivered?.longestGapMs, ' ms')}<br />
+        {captureVerdict(capture)}</p>
     </div>}
     {!latest.length && <p>Aguardando uma transmissão com espectador.</p>}
     {latest.map((row, index) => <div key={`${row.connection}-${index}`} style={{ marginTop: 12, overflowWrap: 'anywhere' }}>

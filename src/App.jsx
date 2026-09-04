@@ -69,6 +69,54 @@ const preferHardwareVideoCodecs = (pc, sender, preferred = 'auto') => {
   catch { return null }
 }
 
+// Bandwidth estimation opens near 0.3 Mbps and climbs only as fast as it is fed. On a screen share that
+// means the first seconds are a smear and the estimate takes a long time to find the real ceiling — and
+// it never looks for one above what is actually being sent, so a still screen keeps it parked low. On a
+// 450 Mbps uplink it was measured sitting at 5 Mbps while the encoder cut 1440p down to 1080p to fit.
+//
+// Chromium reads x-google-start-bitrate and x-google-min-bitrate out of the codec fmtp line, in kbps.
+// Only the video codecs are touched, and only the ones the answer will keep; audio and the FEC and
+// retransmission payloads are left exactly as they were.
+const videoPayloadTypes = (sdp) => {
+  const payloads = new Set()
+  let inVideo = false
+  for (const line of sdp.split(/\r?\n/)) {
+    if (line.startsWith('m=')) inVideo = line.startsWith('m=video')
+    if (!inVideo) continue
+    const rtpmap = /^a=rtpmap:(\d+) ([A-Za-z0-9-]+)\//.exec(line)
+    if (rtpmap && !['rtx', 'red', 'ulpfec', 'flexfec-03'].includes(rtpmap[2].toLowerCase())) payloads.add(rtpmap[1])
+  }
+  return payloads
+}
+
+const withStartBitrate = (sdp, startKbps, minKbps) => {
+  const payloads = videoPayloadTypes(sdp)
+  if (!payloads.size) return sdp
+  const extra = `x-google-start-bitrate=${startKbps};x-google-min-bitrate=${minKbps}`
+  const withFmtp = new Set()
+  const lines = []
+  for (const line of sdp.split(/\r?\n/)) {
+    const fmtp = /^a=fmtp:(\d+) (.*)$/.exec(line)
+    // Record the payload whether or not this line is rewritten. Marking only the rewritten ones makes a
+    // codec that already carries the parameters look like it has no fmtp line at all, and a second pass
+    // over the same description would then append a duplicate.
+    if (fmtp && payloads.has(fmtp[1])) withFmtp.add(fmtp[1])
+    if (fmtp && payloads.has(fmtp[1]) && !line.includes('x-google-start-bitrate')) {
+      lines.push(`a=fmtp:${fmtp[1]} ${fmtp[2]};${extra}`)
+    } else lines.push(line)
+  }
+  // A codec that carries no fmtp line of its own still needs one, or it keeps the 0.3 Mbps opening.
+  const missing = [...payloads].filter((payload) => !withFmtp.has(payload))
+  if (!missing.length) return lines.join('\r\n')
+  const result = []
+  for (const line of lines) {
+    result.push(line)
+    const rtpmap = /^a=rtpmap:(\d+) /.exec(line)
+    if (rtpmap && missing.includes(rtpmap[1])) result.push(`a=fmtp:${rtpmap[1]} ${extra}`)
+  }
+  return result.join('\r\n')
+}
+
 const audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
 
 async function attachDesktopWindowAudio(stream, onError) {
@@ -729,7 +777,12 @@ export default function App() {
         const audioSender = entry.pc.addTrack(audioTrack, stream)
         try { const parameters = audioSender.getParameters(); parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}]; parameters.encodings[0].maxBitrate = 256_000; await audioSender.setParameters(parameters) } catch { /* best effort */ }
       }
-      const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, turnTransport: entry.turnTransport, description: entry.pc.localDescription })
+      const offer = await entry.pc.createOffer()
+      const settings = transmissionSettingsRef.current
+      // Open at a fraction of the ceiling the user picked rather than at Chromium's 0.3 Mbps, and hold a
+      // floor under it, so the first seconds are watchable and the estimate has somewhere to climb from.
+      offer.sdp = withStartBitrate(offer.sdp, Math.round(settings.maxBitrate / 1000 / 2), Math.round(settings.maxBitrate / 1000 / 8))
+      await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, turnTransport: entry.turnTransport, description: entry.pc.localDescription })
       setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); startRouteStats(connectionId, entry.pc); setNotice('Novo espectador conectado à sua transmissão.')
     } catch { setNotice('Não foi possível conectar o novo espectador.') }
   }

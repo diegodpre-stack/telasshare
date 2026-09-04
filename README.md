@@ -77,9 +77,26 @@ Ao iniciar uma captura no aplicativo, o seletor mostra as telas e janelas dispon
 
 Cada push na branch `main` executa `.github/workflows/desktop-release.yml`, gera uma versão nova e publica `EntreTelas-Portable.exe` e `EntreTelas-Setup.exe` nas Releases do GitHub. A versão instalada verifica essa fonte ao abrir, baixa atualizações em segundo plano e oferece reinicialização imediata quando a nova versão fica pronta. A versão portátil precisa ser substituída por um novo download quando houver atualização. Sem um certificado comercial de assinatura, o Windows pode exibir o aviso de editor desconhecido na primeira execução.
 
-Para testar ou gerar o instalador localmente:
+Por padrão, `npm run desktop` abre o site publicado, não os arquivos locais. Para testar alterações do frontend no Electron sem publicar, execute em um terminal:
 
 ```powershell
+npm run build
+npm start
+```
+
+Em outro terminal, na mesma pasta:
+
+```powershell
+$env:ENTRETELAS_APP_URL = 'http://localhost:8787'
+npm run desktop
+```
+
+O endereço alternativo aceita apenas loopback e é ignorado no aplicativo empacotado. Abra `http://localhost:8787` no navegador para entrar como espectador. Para verificar o encoder, use uma transmissão nova com movimento na tela, escolha **Automático** ou **H.264** e confira **Implementação** e **Encoder eficiente informado** no diagnóstico. A consulta de capacidade por perfil é uma indicação, não uma garantia; `OpenH264` é software, enquanto `MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)` identifica o encoder NVIDIA. Hardware não garante, por si só, mais FPS na captura ou na prévia.
+
+Para voltar ao serviço publicado ou gerar o instalador:
+
+```powershell
+Remove-Item Env:ENTRETELAS_APP_URL -ErrorAction SilentlyContinue
 npm run desktop
 npm run desktop:dist
 ```

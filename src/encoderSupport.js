@@ -1,44 +1,93 @@
-// Every attempt at reaching the GPU so far had to go through a live broadcast to learn anything, and
-// each one only answered for whatever codec and resolution the call happened to negotiate. The Media
-// Capabilities API answers the same question directly: for a given codec, size and frame rate, would
-// this machine's WebRTC use an encoder that is powerEfficient — which is the very field that has been
-// reporting false in getStats all along.
-//
-// Two resolutions per codec on purpose. Chromium holds calls on a software encoder while the picture is
-// small, and a broadcast is always small at the start, so a result that differs between the two sizes
-// says something a single probe would hide.
-const probes = [
-  { label: 'H.264 baseline', contentType: 'video/H264;codecs="avc1.42E01F"' },
-  { label: 'H.264 high', contentType: 'video/H264;codecs="avc1.640C1F"' },
-  { label: 'VP9', contentType: 'video/VP9;codecs="vp09.00.10.08"' },
-  { label: 'AV1', contentType: 'video/AV1;codecs="av01.0.04M.08"' },
-  { label: 'VP8', contentType: 'video/VP8' },
-]
 const sizes = [
   { label: '720p', width: 1280, height: 720, bitrate: 3_000_000 },
   { label: '1440p', width: 2560, height: 1440, bitrate: 12_000_000 },
 ]
 
-export async function probeHardwareEncoders() {
-  if (!navigator.mediaCapabilities?.encodingInfo) return null
-  const rows = []
-  for (const probe of probes) {
-    const results = []
-    for (const size of sizes) {
-      try {
-        // type 'webrtc' asks about the realtime pipeline specifically, not file playback, so the answer
-        // is about the encoder a broadcast would actually get.
-        const info = await navigator.mediaCapabilities.encodingInfo({
-          type: 'webrtc',
-          video: { contentType: probe.contentType, width: size.width, height: size.height, bitrate: size.bitrate, framerate: 60 },
-        })
-        results.push({ size: size.label, supported: !!info.supported, smooth: !!info.smooth, powerEfficient: !!info.powerEfficient })
-      } catch {
-        // An unsupported codec string rejects rather than answering, which is itself an answer.
-        results.push({ size: size.label, supported: false, smooth: false, powerEfficient: false })
-      }
-    }
-    rows.push({ label: probe.label, results })
+const codecFamily = (codec) => String(codec.mimeType || '').toLowerCase().split('/')[1]?.replace('av01', 'av1')
+const families = ['h264', 'av1', 'vp9', 'vp8']
+const codecRank = (codec) => {
+  const rank = families.indexOf(codecFamily(codec))
+  return rank < 0 ? families.length : rank
+}
+const videoCodecs = (codecs) => codecs.filter((codec) => families.includes(codecFamily(codec)))
+const advertisedCodecs = () => globalThis.RTCRtpSender?.getCapabilities?.('video')?.codecs || []
+const fmtpParameter = (codec, name) => String(codec.sdpFmtpLine || '').split(';')
+  .map((part) => part.trim().toLowerCase().split('=')).find(([key]) => key === name)?.[1]
+
+// WebRTC queries take RTP format parameters, not file-container strings such as avc1.42E01F.
+// In particular, baseline (4200) and constrained baseline (42e0) can use different encoders.
+export const codecContentType = (codec) => codec.mimeType + (codec.sdpFmtpLine ? `;${codec.sdpFmtpLine}` : '')
+
+async function queryEncoding(codec, configuration, mediaCapabilities, timeoutMs) {
+  if (!mediaCapabilities?.encodingInfo) return null
+  let timer
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => mediaCapabilities.encodingInfo({
+        type: 'webrtc', video: { ...configuration, contentType: codecContentType(codec) },
+      })).then((info) => ({
+        supported: info.supported === true,
+        smooth: typeof info.smooth === 'boolean' ? info.smooth : null,
+        powerEfficient: typeof info.powerEfficient === 'boolean' ? info.powerEfficient : null,
+      })),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs) }),
+    ])
+  } catch {
+    // A rejected query (or an unsupported API) is unknown, not proof of a software-only machine.
+    return null
+  } finally { clearTimeout(timer) }
+}
+
+const positive = (value, fallback) => Number.isFinite(value) && value > 0 ? value : fallback
+
+// This is a preference, not a hardware switch: the receiver and browser still negotiate the encoder.
+// Keep every advertised codec, including RTX/FEC and software fallbacks, for other receivers.
+export async function preferHardwareVideoCodecs(pc, sender, preferred = 'auto', settings = {}, {
+  codecs = advertisedCodecs(), mediaCapabilities = globalThis.navigator?.mediaCapabilities, timeoutMs = 1000,
+} = {}) {
+  const transceiver = pc.getTransceivers().find((item) => item.sender === sender)
+  if (!codecs.length || !transceiver?.setCodecPreferences) return null
+  const source = sender.track?.getSettings?.() || {}
+  const scale = Math.max(1, positive(settings.scaleResolutionDownBy, 1))
+  const configuration = {
+    width: Math.max(1, Math.floor(positive(source.width, 1920) / scale)),
+    height: Math.max(1, Math.floor(positive(source.height, 1080) / scale)),
+    bitrate: positive(settings.maxBitrate, 8_000_000),
+    framerate: positive(settings.fps, 60),
   }
-  return rows
+  const support = new Map(await Promise.all(videoCodecs(codecs).map(async (codec) =>
+    [codec, await queryEncoding(codec, configuration, mediaCapabilities, timeoutMs)])))
+  if (pc.signalingState === 'closed') return null
+  const chosenFirst = (codec) => preferred !== 'auto' && codecFamily(codec) === preferred ? 0 : 1
+  const efficientFirst = (codec) => support.get(codec)?.supported && support.get(codec)?.powerEfficient === true ? 0 : 1
+  const packetizationRank = (codec) => codecFamily(codec) === 'h264' && fmtpParameter(codec, 'packetization-mode') !== '1' ? 1 : 0
+  const ordered = [...codecs].sort((a, b) => chosenFirst(a) - chosenFirst(b)
+    || efficientFirst(a) - efficientFirst(b) || codecRank(a) - codecRank(b)
+    || packetizationRank(a) - packetizationRank(b))
+  try { transceiver.setCodecPreferences(ordered); return ordered[0]?.mimeType || null }
+  catch { return null }
+}
+
+const codecLabel = (codec) => {
+  const name = codec.mimeType.split('/')[1]
+  if (codecFamily(codec) === 'h264') return `H.264 · ${fmtpParameter(codec, 'profile-level-id') || 'perfil padrão'} · modo ${fmtpParameter(codec, 'packetization-mode') || '0'}`
+  const profile = fmtpParameter(codec, 'profile-id') ?? fmtpParameter(codec, 'profile')
+  return profile == null ? name : `${name} · perfil ${profile}`
+}
+
+// Standardized samples of the actual advertised RTP profiles. powerEfficient is a browser hint;
+// only live getStats() can identify the implementation selected for a particular connection.
+export async function probeHardwareEncoders({
+  codecs = advertisedCodecs(), mediaCapabilities = globalThis.navigator?.mediaCapabilities, timeoutMs = 1000,
+} = {}) {
+  if (!mediaCapabilities?.encodingInfo || !codecs.length) return null
+  const unique = [...new Map(videoCodecs(codecs).map((codec) => [codecContentType(codec), codec])).values()]
+  return Promise.all(unique.map(async (codec) => ({
+    id: codecContentType(codec), label: codecLabel(codec),
+    results: await Promise.all(sizes.map(async (size) => ({
+      size: size.label, ...await queryEncoding(codec, {
+        width: size.width, height: size.height, bitrate: size.bitrate, framerate: 60,
+      }, mediaCapabilities, timeoutMs),
+    }))),
+  })))
 }

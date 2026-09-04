@@ -137,13 +137,13 @@ export default function MediaDiagnostics({ peers, localStream }) {
         {captureVerdict(capture)}</p>
     </div>}
     {encoders && <div style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
-      <strong>Encoders disponíveis nesta máquina</strong>
-      <p style={{ margin: '4px 0 0' }}>{encoders.map((row) => <span key={row.label} style={{ display: 'block' }}>
-        {row.label}: {row.results.map((r) => `${r.size} ${!r.supported ? 'não suportado' : r.powerEfficient ? 'HARDWARE' : 'software'}`).join(' · ')}
+      <strong>Capacidade de codificação informada pelo navegador · 60 FPS</strong>
+      <p style={{ margin: '4px 0 0' }}>{encoders.map((row) => <span key={row.id} style={{ display: 'block' }}>
+        {row.label}: {row.results.map((r) => `${r.size} ${r.supported == null ? 'consulta indisponível' : !r.supported ? 'não suportado' : r.powerEfficient === true ? 'eficiente (hardware provável)' : 'hardware não confirmado'}`).join(' · ')}
       </span>)}</p>
-      <p style={{ marginTop: 6 }}>{encoders.some((row) => row.results.some((r) => r.powerEfficient))
-        ? 'Pelo menos um codec usaria a GPU. Escolha ele em “Codec de vídeo” e confirme na linha Implementação durante uma transmissão.'
-        : 'Nenhum codec usaria a GPU nesta máquina. A codificação por hardware não está disponível para o WebRTC aqui, e trocar de framework não muda isso.'}</p>
+      <p style={{ marginTop: 6 }}>{encoders.some((row) => row.results.some((r) => r.supported && r.powerEfficient))
+        ? 'Há perfis informados como eficientes nas configurações testadas. Isso não garante o encoder da conexão: confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão.'
+        : 'A consulta não confirmou um encoder eficiente nas configurações testadas. Isso não prova ausência de hardware: o perfil, a resolução, o navegador e o driver podem mudar o resultado.'}</p>
     </div>}
     {!latest.length && <p>Aguardando uma transmissão com espectador.</p>}
     {latest.map((row, index) => <div key={`${row.connection}-${index}`} style={{ marginTop: 12, overflowWrap: 'anywhere' }}>

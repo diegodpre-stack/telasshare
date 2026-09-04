@@ -4,7 +4,15 @@ const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const APP_URL = 'https://telasshare.onrender.com'
+// Local frontend testing only; packaged builds always use the hosted service.
+const localAppUrl = !app.isPackaged && process.env.ENTRETELAS_APP_URL
+if (localAppUrl) {
+  const url = new URL(localAppUrl)
+  if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+    throw new Error('ENTRETELAS_APP_URL must be a loopback HTTP(S) URL')
+  }
+}
+const APP_URL = localAppUrl || 'https://telasshare.onrender.com'
 
 // Chromium reads each of these switches once, so every feature has to travel in a single list. Adding
 // a second appendSwitch for the same switch name silently replaces the first.

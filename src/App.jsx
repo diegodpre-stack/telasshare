@@ -89,10 +89,14 @@ const videoPayloadTypes = (sdp) => {
   return payloads
 }
 
-const withStartBitrate = (sdp, startKbps, minKbps) => {
+// Only the opening guess, never a floor. An earlier version also set x-google-min-bitrate, which stops
+// the estimator descending when the path cannot take the traffic: measured on a relay that carried about
+// 1.5 Mbps, it kept 5.1 Mbps going out, lost packets steadily and drove the picture down to 722x406.
+// Opening high is a bet that costs one bad second; refusing to come down costs the whole broadcast.
+const withStartBitrate = (sdp, startKbps) => {
   const payloads = videoPayloadTypes(sdp)
   if (!payloads.size) return sdp
-  const extra = `x-google-start-bitrate=${startKbps};x-google-min-bitrate=${minKbps}`
+  const extra = `x-google-start-bitrate=${startKbps}`
   const withFmtp = new Set()
   const lines = []
   for (const line of sdp.split(/\r?\n/)) {
@@ -779,9 +783,10 @@ export default function App() {
       }
       const offer = await entry.pc.createOffer()
       const settings = transmissionSettingsRef.current
-      // Open at a fraction of the ceiling the user picked rather than at Chromium's 0.3 Mbps, and hold a
-      // floor under it, so the first seconds are watchable and the estimate has somewhere to climb from.
-      offer.sdp = withStartBitrate(offer.sdp, Math.round(settings.maxBitrate / 1000 / 2), Math.round(settings.maxBitrate / 1000 / 8))
+      // Open above Chromium's 0.3 Mbps so the first seconds are watchable, but modestly: the ceiling the
+      // user picked describes their uplink, not the relay path in the middle, and overshooting it costs
+      // resolution for as long as the estimator takes to recover.
+      offer.sdp = withStartBitrate(offer.sdp, Math.min(2500, Math.round(settings.maxBitrate / 1000 / 4)))
       await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, turnTransport: entry.turnTransport, description: entry.pc.localDescription })
       setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); startRouteStats(connectionId, entry.pc); setNotice('Novo espectador conectado à sua transmissão.')
     } catch { setNotice('Não foi possível conectar o novo espectador.') }

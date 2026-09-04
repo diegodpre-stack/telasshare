@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MediaDiagnostics from './MediaDiagnostics.jsx'
-import { buildIceConfiguration, initialIceStage } from './icePolicy.js'
+import { buildIceConfiguration, initialIceStage, canPreserveWithoutTurn } from './icePolicy.js'
 import { applySenderSettings } from './senderSettings.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
@@ -359,7 +359,7 @@ export default function App() {
         failConnection()
       }
     }
-    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, 30_000)
+    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, mode === 'auto' ? 8_000 : 30_000)
     return entry
   }, [closeConnection, send])
 
@@ -533,7 +533,23 @@ export default function App() {
         const hadTurn = iceServersRef.current.some((entry) => JSON.stringify(entry.urls).includes('turn:') || JSON.stringify(entry.urls).includes('turns:'))
         iceServersRef.current = result.iceServers.length ? result.iceServers : staticIceServers()
         if (hadTurn && !result.turnEnabled) {
-          for (const id of [...pcsRef.current.keys()]) closeConnection(id, true)
+          await Promise.all([...pcsRef.current].map(async ([id, entry]) => {
+            let preserve = false
+            try { preserve = await canPreserveWithoutTurn(entry.pc) } catch { /* Unknown relay usage: fail closed. */ }
+            if (disposed || pcsRef.current.get(id) !== entry) return
+            if (!preserve) { closeConnection(id, true); return }
+            // Direct-only peers need no restart. For a direct pair that also had
+            // relay candidates, start a STUN-only generation to retire those.
+            if (entry.turnTransport !== 'direct') {
+              try {
+                entry.pc.setConfiguration(buildIceConfiguration(iceServersRef.current, 'direct', false, entry.pc.getConfiguration()))
+                entry.turnTransport = 'direct'
+                entry.mode = 'p2p'; entry.autoFallback = false
+                if (entry.role === 'transmitter') entry.restart()
+                else send({ type: 'restart-request', to: entry.peerId, connectionId: id })
+              } catch { closeConnection(id, true) }
+            }
+          }))
           setNotice(result.reason === 'monthly-limit' ? 'O limite mensal de segurança do servidor auxiliar foi atingido. O P2P continua disponível.' : 'O servidor auxiliar foi desativado por segurança. O P2P continua disponível.')
         }
       } catch { /* a ausência de resposta nunca habilita TURN */ }
@@ -541,7 +557,7 @@ export default function App() {
     refreshTurnAccess()
     const timer = setInterval(refreshTurnAccess, 5 * 60 * 1000)
     return () => { disposed = true; clearInterval(timer) }
-  }, [accessSession, closeConnection, joined])
+  }, [accessSession, closeConnection, joined, send])
 
   const loginSite = async (event) => {
     event.preventDefault(); const cleanName = name.trim()

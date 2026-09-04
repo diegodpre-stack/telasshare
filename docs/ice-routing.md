@@ -1,13 +1,13 @@
 # Roteamento automático e diagnóstico
 
-No modo automático, P2P e TURN por UDP são preparados na mesma negociação,
-com `iceTransportPolicy: all`. Não há uma espera fixa de 30 segundos para
-começar a preparar UDP. O ICE escolhe um par viável; isso não garante P2P.
+No modo automático, a primeira tentativa usa somente STUN durante 8 segundos.
+Sem conexão, adiciona TURN por UDP mantendo `iceTransportPolicy: all`, sem
+excluir caminhos diretos. O ICE escolhe um par viável; isso não garante P2P.
 Somente uma rota é usada para enviar a mídia dessa conexão. Se for relay,
 o tráfego continua contando na franquia do provedor. Os limites de emissão
 de credenciais do backend não foram alterados.
 
-TCP/TLS só entra após 30 segundos sem conexão. Essa etapa mantém candidatos
+TCP/TLS só entra após mais 30 segundos sem conexão na etapa UDP. Essa etapa mantém candidatos
 diretos disponíveis no modo automático. Uma conexão que já funciona não é
 migrada por esse temporizador. Após falha de uma conexão estabelecida, a
 tentativa de recuperação volta a ter prazo, em vez de ficar indefinida.

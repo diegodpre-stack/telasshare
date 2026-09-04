@@ -29,7 +29,8 @@ for (const mode of ['auto', 'turn', 'p2p']) {
   })
   vm.runInContext(`${callback}\nglobalThis.makePeer = createPeer`, context)
   const entry = context.makePeer('test', 'friend', 'transmitter', mode)
-  assert.equal(entry.turnTransport, mode === 'p2p' ? 'direct' : 'udp')
+  assert.equal(entry.turnTransport, mode === 'turn' ? 'udp' : 'direct')
+  assert.equal([...timers.values()][0].delay, mode === 'auto' ? 8_000 : 30_000)
   assert.equal(timers.size, 1)
   entry.pc.iceConnectionState = 'connected'; entry.pc.oniceconnectionstatechange()
   assert.equal(timers.size, 0, 'success cancels fallback')
@@ -40,7 +41,7 @@ for (const mode of ['auto', 'turn', 'p2p']) {
   const [id, timer] = [...timers][0]; timers.delete(id); timer.fn()
   if (mode === 'p2p') assert.deepEqual(closed, ['test'])
   else {
-    assert.equal(entry.turnTransport, 'all')
+    assert.equal(entry.turnTransport, mode === 'auto' ? 'udp' : 'all')
     assert.equal(entry.pc.config.iceTransportPolicy, mode === 'auto' ? 'all' : 'relay')
     assert.equal(timers.size, 1)
     entry.pc.iceConnectionState = 'connected'; entry.pc.oniceconnectionstatechange()

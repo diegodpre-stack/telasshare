@@ -9,7 +9,7 @@ assert.equal(servers[0].urls.length, 4)
 for (const mode of ['auto', 'turn', 'p2p']) {
   const config = buildIceConfiguration(servers, initialIceStage(mode), mode === 'turn')
   assert.equal(config.iceTransportPolicy, mode === 'turn' ? 'relay' : 'all')
-  assert.equal(config.iceServers[0].urls.length, mode === 'p2p' ? 1 : 2)
+  assert.equal(config.iceServers[0].urls.length, mode === 'turn' ? 2 : 1)
   assert.ok(config.iceServers[0].urls.every(url => !url.includes('tcp')))
 }
 assert.equal(buildIceConfiguration(servers, 'all', false).iceTransportPolicy, 'all')

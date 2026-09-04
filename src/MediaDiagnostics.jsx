@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { summarizeStats } from './mediaDiagnostics.js'
 import { startCaptureRateMeter } from './captureRate.js'
+import { probeHardwareEncoders } from './encoderSupport.js'
 
 // What the capture track actually granted, which is not what we asked for. A source pinned to 30 FPS
 // caps the whole broadcast before a single frame reaches an encoder, and no sender setting can lift it.
@@ -51,6 +52,12 @@ export default function MediaDiagnostics({ peers, localStream }) {
   const [latest, setLatest] = useState([])
   const [capture, setCapture] = useState(null)
   const meter = useRef(null)
+  const [encoders, setEncoders] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    probeHardwareEncoders().then((rows) => { if (!cancelled) setEncoders(rows) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
   useEffect(() => {
     let disposed = false, busy = false, sequence = 0
     const states = new Map()
@@ -128,6 +135,15 @@ export default function MediaDiagnostics({ peers, localStream }) {
         Intervalo entre quadros: menor {value(capture.delivered?.shortestGapMs, ' ms')} · mediano {value(capture.delivered?.medianGapMs, ' ms')} · maior {value(capture.delivered?.longestGapMs, ' ms')}<br />
         Quadro: {capture.delivered?.onGpu == null ? 'indisponível' : capture.delivered.onGpu ? 'opaco, ainda na GPU' : `já na CPU, formato ${capture.delivered.frameFormat}`} · Tamanho real: {value(capture.delivered?.codedSize)}<br />
         {captureVerdict(capture)}</p>
+    </div>}
+    {encoders && <div style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
+      <strong>Encoders disponíveis nesta máquina</strong>
+      <p style={{ margin: '4px 0 0' }}>{encoders.map((row) => <span key={row.label} style={{ display: 'block' }}>
+        {row.label}: {row.results.map((r) => `${r.size} ${!r.supported ? 'não suportado' : r.powerEfficient ? 'HARDWARE' : 'software'}`).join(' · ')}
+      </span>)}</p>
+      <p style={{ marginTop: 6 }}>{encoders.some((row) => row.results.some((r) => r.powerEfficient))
+        ? 'Pelo menos um codec usaria a GPU. Escolha ele em “Codec de vídeo” e confirme na linha Implementação durante uma transmissão.'
+        : 'Nenhum codec usaria a GPU nesta máquina. A codificação por hardware não está disponível para o WebRTC aqui, e trocar de framework não muda isso.'}</p>
     </div>}
     {!latest.length && <p>Aguardando uma transmissão com espectador.</p>}
     {latest.map((row, index) => <div key={`${row.connection}-${index}`} style={{ marginTop: 12, overflowWrap: 'anywhere' }}>

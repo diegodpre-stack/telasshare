@@ -1,19 +1,19 @@
 # Roteamento automático e diagnóstico
 
-No modo automático, a primeira tentativa usa somente STUN durante 8 segundos.
+No modo automático, a primeira tentativa usa somente STUN durante 3 segundos.
 Sem conexão, adiciona TURN por UDP mantendo `iceTransportPolicy: all`, sem
 excluir caminhos diretos. O ICE escolhe um par viável; isso não garante P2P.
 Somente uma rota é usada para enviar a mídia dessa conexão. Se for relay,
 o tráfego continua contando na franquia do provedor. Os limites de emissão
 de credenciais do backend não foram alterados.
 
-TCP/TLS só entra após mais 30 segundos sem conexão na etapa UDP. Essa etapa mantém candidatos
+TCP/TLS só entra após mais 7 segundos sem conexão na etapa UDP. Essa etapa mantém candidatos
 diretos disponíveis no modo automático. Uma conexão que já funciona não é
 migrada por esse temporizador. Após falha de uma conexão estabelecida, a
 tentativa de recuperação volta a ter prazo, em vez de ficar indefinida.
 
 P2P manual continua sem TURN. TURN manual continua relay-only, primeiro UDP,
-com a mesma janela de 30 segundos antes de permitir TCP/TLS.
+com a mesma janela de 7 segundos antes de permitir TCP/TLS.
 
 O relatório registra separadamente protocolo ICE, transporte local até TURN,
 tipo dos candidatos local/remoto, implementação do encoder/decoder e indicador

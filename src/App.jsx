@@ -430,7 +430,7 @@ export default function App() {
           entry.restart()
           // Success cleared the initial timer. Recovery also needs a bounded
           // attempt; otherwise subsequent failures never reach fallback again.
-          if (!entry.fallbackTimer) entry.fallbackTimer = setTimeout(advanceFallback, 30_000)
+          if (!entry.fallbackTimer) entry.fallbackTimer = setTimeout(advanceFallback, 7_000)
         } else send({ type: 'restart-request', to: peerId, connectionId })
       }
       if (pc.iceConnectionState === 'disconnected' && !entry.disconnectTimer) entry.disconnectTimer = setTimeout(() => {
@@ -456,13 +456,14 @@ export default function App() {
         entry.mode = 'turn'; entry.autoFallback = mode === 'auto'; entry.restarting = false
         entry.turnTransport = nextStage
         entry.restart()
-        // Relay over UDP needs room to complete; rushing this stage is what lets TCP win the race.
-        entry.fallbackTimer = setTimeout(advanceFallback, 30_000)
+        // UDP normally establishes quickly. Keep a short window before allowing TCP/TLS so restrictive
+        // networks recover promptly without making every automatic viewer wait half a minute.
+        entry.fallbackTimer = setTimeout(advanceFallback, 7_000)
       } else {
         failConnection()
       }
     }
-    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, mode === 'auto' ? 8_000 : 30_000)
+    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, mode === 'auto' ? 3_000 : 7_000)
     return entry
   }, [closeConnection, send])
 
@@ -628,7 +629,7 @@ export default function App() {
         else if (message.type === 'restart-request') pcsRef.current.get(message.connectionId)?.restart?.()
         else if (message.type === 'stop') {
           closeConnection(message.connectionId, false)
-          if (message.reason) setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, error: message.reason === 'ice-timeout' ? 'A negociação terminou, mas a conexão de rede não foi estabelecida em 30 segundos. Feche esta janela e tente outro modo.' : 'A negociação não recebeu resposta a tempo. Feche esta janela, atualizem ambos o app e tentem novamente.' } }))
+          if (message.reason) setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, error: message.reason === 'ice-timeout' ? 'A negociação terminou, mas a conexão de rede não foi estabelecida. Feche esta janela e tente outro modo.' : 'A negociação não recebeu resposta a tempo. Feche esta janela, atualizem ambos o app e tentem novamente.' } }))
           setNotice('Visualização encerrada. Se não conectou, consulte o diagnóstico na janela.')
         }
         else if (message.type === 'peer-left') { for (const [id, entry] of pcsRef.current) if (entry.peerId === message.id) closeConnection(id, false); setRemoteScreens((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value.peerId !== message.id))) }

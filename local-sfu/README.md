@@ -1,4 +1,4 @@
-# Teste SFU local — EntreTelas
+# Teste SFU local — TelasShare
 
 Laboratório isolado do aplicativo atual. Usa LiveKit Server 1.13.6 para Windows x64;
 download oficial com validação SHA-256. Não acessa LiveKit Cloud ou Cloudflare TURN.

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title EntreTelas
+title TelasShare
 
 where node >nul 2>nul
 if errorlevel 1 (
@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 if not exist "node_modules\" (
-  echo Preparando o EntreTelas pela primeira vez...
+  echo Preparando o TelasShare pela primeira vez...
   call npm install
   if errorlevel 1 goto :erro
 )
@@ -24,7 +24,7 @@ call npm run build
 if errorlevel 1 goto :erro
 
 echo.
-echo EntreTelas iniciado. Mantenha esta janela aberta.
+echo TelasShare iniciado. Mantenha esta janela aberta.
 echo Para encerrar, pressione Ctrl+C ou feche esta janela.
 echo.
 start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:8787"
@@ -33,6 +33,6 @@ exit /b 0
 
 :erro
 echo.
-echo Nao foi possivel iniciar o EntreTelas.
+echo Nao foi possivel iniciar o TelasShare.
 pause
 exit /b 1

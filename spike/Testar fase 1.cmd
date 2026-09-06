@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title EntreTelas - teste da fase 1
+title TelasShare - teste da fase 1
 set "ROOT=%~dp0"
 
 echo.
@@ -9,7 +9,7 @@ echo  ------------------------------------------------------------
 echo.
 
 echo  [1/3] subindo o relay WHIP numa janela propria...
-start "EntreTelas - relay WHIP" cmd /k "pushd "%ROOT%.." && node spike\whip-relay.mjs"
+start "TelasShare - relay WHIP" cmd /k "pushd "%ROOT%.." && node spike\whip-relay.mjs"
 
 REM O relay precisa estar ouvindo antes de o navegador comecar a perguntar pela oferta.
 timeout /t 2 /nobreak >nul

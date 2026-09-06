@@ -1,6 +1,6 @@
 {
   "name": "private-screen-share",
-  "productName": "EntreTelas",
+  "productName": "TelasShare",
   "description": "Compartilhamento privado de tela entre amigos",
   "author": "diegodpre-stack",
   "private": true,
@@ -44,7 +44,7 @@
   },
   "build": {
     "appId": "com.entretelas.desktop",
-    "productName": "EntreTelas",
+    "productName": "TelasShare",
     "asar": true,
     "directories": {
       "output": "release"
@@ -76,11 +76,11 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "EntreTelas",
-      "artifactName": "EntreTelas-Setup.${ext}"
+      "shortcutName": "TelasShare",
+      "artifactName": "TelasShare-Setup.${ext}"
     },
     "portable": {
-      "artifactName": "EntreTelas-Portable.${ext}"
+      "artifactName": "TelasShare-Portable.${ext}"
     },
     "publish": [
       {

@@ -1,4 +1,4 @@
-# EntreTelas — compartilhamento privado de tela
+# TelasShare — compartilhamento privado de tela
 
 Primeira versão funcional de compartilhamento privado de tela. O navegador do transmissor exige clique explícito e escolha manual da tela. O projeto não oferece controle remoto, clipboard, arquivos nem captura silenciosa.
 
@@ -19,7 +19,7 @@ Usuários comuns entram no site apenas escolhendo um nome. O lobby atualiza auto
 
 ## Teste rápido no mesmo computador
 
-No Windows, depois da primeira instalação, você também pode abrir `Abrir EntreTelas.bat` com dois cliques. O iniciador encontra a pasta automaticamente, prepara o projeto quando necessário, abre o navegador e mantém o servidor ativo enquanto a janela permanecer aberta.
+No Windows, depois da primeira instalação, você também pode abrir `Abrir TelasShare.bat` com dois cliques. O iniciador encontra a pasta automaticamente, prepara o projeto quando necessário, abre o navegador e mantém o servidor ativo enquanto a janela permanecer aberta.
 
 ```powershell
 Copy-Item .env.example .env
@@ -71,11 +71,13 @@ No plano gratuito, o serviço pode dormir após 15 minutos sem tráfego e levar 
 
 ### Aplicativo para Windows
 
-O site oferece em todas as telas uma versão portátil (`EntreTelas-Portable.exe`), que abre sem instalação, e um instalador Windows 64-bit opcional. O aplicativo Electron abre o mesmo serviço hospedado no Render, portanto usuários do navegador e do aplicativo entram nas mesmas salas e assistem às mesmas transmissões. Ele inclui seu próprio mecanismo Chromium e não depende de Edge, Chrome ou WebView2 instalados.
+O site oferece em todas as telas uma versão portátil (`TelasShare-Portable.exe`), que abre sem instalação, e um instalador Windows 64-bit opcional. O aplicativo Electron abre o mesmo serviço hospedado no Render, portanto usuários do navegador e do aplicativo entram nas mesmas salas e assistem às mesmas transmissões. Ele inclui seu próprio mecanismo Chromium e não depende de Edge, Chrome ou WebView2 instalados.
 
 Ao iniciar uma captura no aplicativo, o seletor mostra as telas e janelas disponíveis. Nada pode iniciar a captura silenciosamente. Tela inteira pode incluir todo o áudio do sistema. No Windows 10 build 20348 ou posterior, uma janela usa um capturador WASAPI nativo por processo: ele inclui a árvore de processos do aplicativo escolhido e exclui Discord e outros programas. Se esse recurso não estiver disponível, a janela é transmitida sem áudio em vez de usar silenciosamente o áudio completo do computador. Na versão web, selecione uma guia no Chrome/Edge para compartilhar apenas o áudio dela.
 
-Cada push na branch `main` executa `.github/workflows/desktop-release.yml`, gera uma versão nova e publica `EntreTelas-Portable.exe` e `EntreTelas-Setup.exe` nas Releases do GitHub. A versão instalada verifica essa fonte ao abrir, baixa atualizações em segundo plano e oferece reinicialização imediata quando a nova versão fica pronta. A versão portátil precisa ser substituída por um novo download quando houver atualização. Sem um certificado comercial de assinatura, o Windows pode exibir o aviso de editor desconhecido na primeira execução.
+O aplicativo se chamava EntreTelas até a versão 0.1.84. O nome visível mudou, mas o `appId` (`com.entretelas.desktop`), as chaves de `localStorage` (`entretelas-*`) e as variáveis de ambiente (`ENTRETELAS_*`) continuam com o nome antigo de propósito: o `appId` é a identidade da instalação para o Windows, e trocá-lo faria a atualização instalar uma segunda cópia ao lado da primeira em vez de substituí-la; trocar as chaves apagaria o nome e as preferências já salvas de quem usa. São identificadores internos, que ninguém vê.
+
+Cada push na branch `main` executa `.github/workflows/desktop-release.yml`, gera uma versão nova e publica `TelasShare-Portable.exe` e `TelasShare-Setup.exe` nas Releases do GitHub. A versão instalada verifica essa fonte ao abrir, baixa atualizações em segundo plano e oferece reinicialização imediata quando a nova versão fica pronta. A versão portátil precisa ser substituída por um novo download quando houver atualização. Sem um certificado comercial de assinatura, o Windows pode exibir o aviso de editor desconhecido na primeira execução.
 
 Por padrão, `npm run desktop` abre o site publicado, não os arquivos locais. Para testar alterações do frontend no Electron sem publicar, execute em um terminal:
 

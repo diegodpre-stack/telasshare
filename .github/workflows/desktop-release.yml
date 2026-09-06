@@ -53,7 +53,7 @@ jobs:
           tag_name: v0.1.${{ github.run_number }}
           generate_release_notes: true
           files: |
-            release/EntreTelas-Setup.exe
-            release/EntreTelas-Setup.exe.blockmap
-            release/EntreTelas-Portable.exe
+            release/TelasShare-Setup.exe
+            release/TelasShare-Setup.exe.blockmap
+            release/TelasShare-Portable.exe
             release/latest.yml

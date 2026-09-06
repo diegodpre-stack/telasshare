@@ -230,7 +230,12 @@ function configureAudioBridge() {
   })
   ipcMain.handle('native-broadcast-start', async (event, options) => {
     if (!fromTrustedPage(event) || findGstreamer() === null) return false
-    try { return await nativeBroadcastInstance().start(options && typeof options === 'object' ? options : {}) }
+    try {
+      // The page may ask for sound; which process to leave out of it is decided here, because the page
+      // cannot know this process's pid and should not be trusted with it if it did.
+      const asked = options && typeof options === 'object' ? options : {}
+      return await nativeBroadcastInstance().start({ ...asked, excludePid: process.pid })
+    }
     catch { return false }
   })
   ipcMain.handle('native-viewer-add', (event, connectionId) =>

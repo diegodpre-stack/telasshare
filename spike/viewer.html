@@ -90,6 +90,9 @@ function reportStats(pc) {
           bytes: r.bytesReceived,
         });
       }
+      if (r.type === 'inbound-rtp' && r.kind === 'audio') {
+        Object.assign(wire, { audioCodec: 'opus', audioPackets: r.packetsReceived, audioBytes: r.bytesReceived, audioLevel: r.audioLevel });
+      }
       if (r.type === 'candidate-pair' && r.nominated) wire.rttMs = Math.round((r.currentRoundTripTime || 0) * 1000);
       if (r.type === 'remote-candidate' && wire.remote === undefined) wire.remote = r.candidateType;
       if (r.type === 'local-candidate' && wire.local === undefined) wire.local = r.candidateType;

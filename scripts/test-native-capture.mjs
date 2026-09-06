@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline } =
+const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback } =
   createRequire(import.meta.url)('../desktop/nativeCapture.cjs')
 
 // --- finding the install -------------------------------------------------
@@ -74,6 +74,42 @@ for (const bad of [0, -1, null, 'abc', 1.5]) {
   assert.ok(args.includes('monitor-index=1') && !args.includes('window-handle'), `bad handle ${bad} must not be used`)
 }
 
+// --- sound ----------------------------------------------------------------
+// Silence is the default: a broadcast that quietly carried the whole desktop's audio because nobody
+// said otherwise would be a privacy failure.
+assert.ok(!buildPipelineArgs({ endpoint: 'http://x/whip' }).join(' ').includes('wasapi2src'))
+
+const withAudio = buildPipelineArgs({ endpoint: 'http://x/whip', audio: true }).join(' ')
+assert.ok(withAudio.includes('wasapi2src') && withAudio.includes('loopback=true'))
+assert.ok(withAudio.includes('opusenc') && withAudio.includes('rtpopuspay'))
+// Browsers need Opus at 48k stereo, and the payload type must not collide with the video's.
+assert.ok(withAudio.includes('encoding-name=OPUS') && withAudio.includes('clock-rate=48000'))
+assert.ok(withAudio.includes('payload=97') && withAudio.includes('payload=96'))
+// Both branches link into one named sink, each through its own queue: sharing a thread lets the slower
+// branch stall the faster, which on a live broadcast is a stutter in whichever loses.
+assert.equal((withAudio.match(/! ws\./g) || []).length, 2, 'sound and picture must both reach the sink')
+assert.equal((withAudio.match(/queue/g) || []).length, 2, 'each branch needs its own queue')
+assert.ok(withAudio.includes('whipsink name=ws'), 'the sink has to be named for either branch to find it')
+
+// Excluding this app keeps the friends being listened to out of what is sent back to them.
+const excluded = buildPipelineArgs({ endpoint: 'http://x/whip', audio: true, excludePid: 4321, allowProcessLoopback: true }).join(' ')
+assert.ok(excluded.includes('loopback-mode=exclude-process-tree') && excluded.includes('loopback-target-pid=4321'))
+// Where per-process loopback is unavailable the property does not exist and gst-launch refuses the whole
+// pipeline, so sound must fall back to the whole system rather than take the picture down with it.
+const noProcessLoopback = buildPipelineArgs({ endpoint: 'http://x/whip', audio: true, excludePid: 4321, allowProcessLoopback: false }).join(' ')
+assert.ok(noProcessLoopback.includes('wasapi2src') && !noProcessLoopback.includes('loopback-target-pid'))
+for (const bad of [0, -1, null, 'x']) {
+  const args = buildPipelineArgs({ endpoint: 'http://x/whip', audio: true, excludePid: bad, allowProcessLoopback: true }).join(' ')
+  assert.ok(!args.includes('loopback-target-pid'), `a pid of ${bad} must not reach the command line`)
+}
+
+// The probe reads gst-inspect once and remembers, since the answer cannot change while the app runs.
+let probes = 0
+const answer = (stdout) => () => { probes += 1; return { stdout } }
+assert.equal(supportsProcessLoopback('D:\gst\bin', answer('loopback-target-pid : Process ID')), true)
+assert.equal(supportsProcessLoopback('D:\gst\bin', answer('')), true, 'the answer is cached, not asked again')
+assert.equal(probes, 1)
+
 // --- spawning -------------------------------------------------------------
 let spawned = null
 const fakeSpawn = (command, spawnArgs, options) => { spawned = { command, spawnArgs, options }; return { pid: 1 } }
@@ -89,4 +125,4 @@ assert.ok(spawned.options.env.PATH.startsWith('D:\\gst\\bin;'), 'the install dir
 assert.ok(spawned.options.env.PATH.includes('C:\\windows'), 'and the rest of PATH must survive')
 assert.equal(spawned.options.windowsHide, true, 'no console window may flash over a live broadcast')
 
-console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, sane defaults and missing-install fallback.')
+console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, system sound with the app excluded, sane defaults and missing-install fallback.')

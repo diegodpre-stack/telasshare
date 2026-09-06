@@ -9,7 +9,7 @@
 // No C++ here on purpose. whipsink speaks WHIP, which is plain HTTP, so Electron can be the endpoint it
 // posts to and forward the SDP over the signalling socket the app already has. The "native helper" is
 // gst-launch itself, spawned the way process-audio-capture already is.
-const { spawn } = require('node:child_process')
+const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 
@@ -52,12 +52,51 @@ const sourceArgs = ({ windowHandle, monitorIndex }) => {
   return [`monitor-index=${Number.isInteger(monitorIndex) && monitorIndex >= 0 ? monitorIndex : 0}`]
 }
 
+// Per-process loopback needs a recent enough Windows for WASAPI process capture. Where it is missing the
+// property does not exist either, and gst-launch refuses the whole pipeline -- taking the picture down
+// with the sound. Asked once and remembered, since the answer cannot change while the app runs.
+let processLoopback = null
+function supportsProcessLoopback(bin, run = spawnSync) {
+  if (processLoopback !== null) return processLoopback
+  try {
+    const probe = run(path.join(bin, 'gst-inspect-1.0.exe'), ['wasapi2src'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
+    processLoopback = typeof probe.stdout === 'string' && probe.stdout.includes('loopback-target-pid')
+  } catch { processLoopback = false }
+  return processLoopback
+}
+
+// System sound, minus the app itself. Without that exclusion the broadcast picks up the friends being
+// listened to and sends them their own voices back; excluding this process tree keeps everything else --
+// the game, the music -- and drops only what the app is playing.
+const audioArgs = ({ excludePid, allowProcessLoopback }) => {
+  const source = ['wasapi2src', 'loopback=true', 'low-latency=true']
+  if (allowProcessLoopback && Number.isInteger(excludePid) && excludePid > 0) {
+    source.push('loopback-mode=exclude-process-tree', `loopback-target-pid=${excludePid}`)
+  }
+  return [
+    ...source,
+    '!', 'audioconvert',
+    '!', 'audioresample',
+    '!', 'opusenc',
+    '!', 'rtpopuspay', 'pt=97',
+    '!', 'application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000,encoding-params=(string)2',
+    '!', 'queue',
+    '!', 'ws.',
+  ]
+}
+
 // One encoder, one WHIP session. Phase 3 turns this into a tee feeding several sinks; the encoder
 // settings below stay shared, which is the point -- today the app encodes once per viewer.
-function buildPipelineArgs({ endpoint, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true } = {}) {
+function buildPipelineArgs({
+  endpoint, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true,
+  audio = false, excludePid = null, allowProcessLoopback = false,
+} = {}) {
   if (!endpoint) throw new Error('endpoint is required')
   return [
     '-e',
+    // Named first so both branches can link into it. Sound and picture are separate sources at separate
+    // rates, so each ends in its own queue: sharing one thread lets the slower branch stall the faster.
+    'whipsink', 'name=ws', `whip-endpoint=${endpoint}`,
     'd3d11screencapturesrc',
     ...sourceArgs({ windowHandle, monitorIndex }),
     `show-cursor=${showCursor ? 'true' : 'false'}`,
@@ -73,16 +112,22 @@ function buildPipelineArgs({ endpoint, monitorIndex = 0, windowHandle = null, fp
     '!', 'h264parse', 'config-interval=-1',
     '!', 'rtph264pay', 'aggregate-mode=zero-latency', 'config-interval=-1', 'pt=96',
     '!', 'application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000',
+    '!', 'queue',
     // whipsink rather than whipclientsink: the latter wraps webrtcsink, whose codec discovery fails on
     // D3D11 memory and which rejects already-encoded input with "not-negotiated" once a viewer attaches.
-    '!', 'whipsink', `whip-endpoint=${endpoint}`,
+    '!', 'ws.',
+    ...(audio ? audioArgs({ excludePid, allowProcessLoopback }) : []),
   ]
 }
 
 function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exists = fs.existsSync } = {}) {
   const bin = findGstreamer(env, exists)
   if (!bin) return null
-  const child = spawnFn(path.join(bin, 'gst-launch-1.0.exe'), buildPipelineArgs(options), {
+  const args = buildPipelineArgs({
+    ...options,
+    allowProcessLoopback: options.audio ? supportsProcessLoopback(bin) : false,
+  })
+  const child = spawnFn(path.join(bin, 'gst-launch-1.0.exe'), args, {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     // The plugin scanner needs the install's own directory on PATH or it silently finds no elements.
@@ -91,4 +136,4 @@ function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exist
   return child
 }
 
-module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline }
+module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback }

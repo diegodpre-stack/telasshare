@@ -145,17 +145,20 @@ async function chooseDisplaySource(request, callback) {
   }
 }
 
-// desktopCapturer names a screen by Electron's display id and a window by its HWND, neither of which
-// GStreamer takes. A window becomes the handle it already carries -- the same shape the audio helper
-// parses out of these ids. A screen has to become a DXGI index, and the honest way to get one is the
-// position of that display in Electron's own list: the orders come from the same enumeration, so they
-// agree in practice, and the preview shows immediately when they do not.
+// desktopCapturer ids already carry what the pipeline needs. A window is "window:<HWND>:<n>", and that
+// handle is what window-handle takes -- the same shape the audio helper parses out of these ids. A
+// screen is "screen:<index>:<n>", and that index is the capture index, verified against this machine:
+// screen:0 is the 2560x1440 at x=0, screen:1 the 1920x1080 at x=2560, screen:2 the one at x=4480, and
+// monitor-index 0/1/2 report exactly those resolutions.
+//
+// Matching through screen.getAllDisplays() instead was the bug behind every native broadcast showing
+// the primary monitor: that list is ordered differently from the capture indices, so nothing matched
+// and the fallback took over. The id is the authority, not the display list.
 function describeSource(source) {
   const window = /^window:(\d+):/.exec(source.id)
   if (window) return { kind: 'window', windowHandle: Number(window[1]), name: source.name }
   const display = /^screen:(\d+):/.exec(source.id)
-  const index = display ? screen.getAllDisplays().findIndex((item) => String(item.id) === display[1]) : -1
-  return { kind: 'monitor', monitorIndex: index >= 0 ? index : 0, name: source.name }
+  return { kind: 'monitor', monitorIndex: display ? Number(display[1]) : 0, name: source.name }
 }
 
 function configureSession() {

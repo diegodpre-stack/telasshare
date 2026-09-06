@@ -10,10 +10,17 @@
 const { startPipeline: defaultStartPipeline, normalizeH264Profile } = require('./nativeCapture.cjs')
 const { createWhipBridge } = require('./whipBridge.cjs')
 
+// whipsink offers only once the first frame reaches it, so a source producing nothing leaves the whole
+// pipeline sitting in PLAYING with nobody told. That is what a minimised window, an occluded one, or a
+// game in exclusive fullscreen looks like from here: no error, no picture, no offer. Long enough that a
+// slow first frame is not mistaken for a dead source.
+const FIRST_FRAME_TIMEOUT_MS = 8_000
+
 function createNativeBroadcast({
   onOffer, onCandidate, onViewerGone, onError,
   startPipeline = defaultStartPipeline,
   bridgeFactory = createWhipBridge,
+  firstFrameTimeoutMs = FIRST_FRAME_TIMEOUT_MS,
 } = {}) {
   const viewers = new Map()
   let bridge = null
@@ -30,6 +37,7 @@ function createNativeBroadcast({
     const viewer = viewers.get(connectionId)
     if (!viewer) return
     viewers.delete(connectionId)
+    clearTimeout(viewer.firstFrame)
     bridge?.closeSession(viewer.sessionId)
     // The pipeline holds the capture and the encoder; leaving one behind burns GPU for nobody.
     try { viewer.child?.kill() } catch { /* already gone */ }
@@ -48,7 +56,12 @@ function createNativeBroadcast({
         transform: normalizeH264Profile,
         onOffer: (sessionId, sdp) => {
           const connectionId = connectionFor(sessionId)
-          if (connectionId) onOffer?.(connectionId, sdp)
+          if (!connectionId) return
+          // The offer is proof a frame arrived, which is the only signal the source is alive.
+          const viewer = viewers.get(connectionId)
+          clearTimeout(viewer?.firstFrame)
+          if (viewer) viewer.firstFrame = null
+          onOffer?.(connectionId, sdp)
         },
         onCandidate: (sessionId, candidate) => {
           const connectionId = connectionFor(sessionId)
@@ -76,7 +89,13 @@ function createNativeBroadcast({
         onError?.(connectionId, 'gstreamer-missing')
         return false
       }
-      viewers.set(connectionId, { sessionId: id, child })
+      const firstFrame = setTimeout(() => {
+        if (!viewers.has(connectionId)) return
+        onError?.(connectionId, 'no-frames')
+        dropViewer(connectionId, true)
+      }, firstFrameTimeoutMs)
+      firstFrame.unref?.()
+      viewers.set(connectionId, { sessionId: id, child, firstFrame })
       // A pipeline that dies takes its viewer with it; the app should hear about that once.
       child.once?.('exit', () => { if (viewers.get(connectionId)?.child === child) dropViewer(connectionId, true) })
       return true

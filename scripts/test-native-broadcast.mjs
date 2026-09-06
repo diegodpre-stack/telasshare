@@ -106,4 +106,46 @@ assert.deepEqual(missing.events.errors, [{ id: 'c1', reason: 'gstreamer-missing'
 assert.equal(missing.broadcast.viewerCount, 0, 'a viewer with no pipeline must not be tracked')
 assert.ok(missing.bridge.closed.length === 1, 'and its session must not be left dangling')
 
-console.log('PASS: per-viewer sessions and pipelines, id routing, isolated failures, clean stop and missing-GStreamer fallback.')
+// --- a source that never produces a frame ---------------------------------
+// whipsink only offers once a frame reaches it, so a minimised window, an occluded one or a game in
+// exclusive fullscreen leaves the pipeline in PLAYING forever with nothing said. Hanging in silence is
+// the worst outcome available, so it has to become an error someone can read.
+const silent = setup()
+await silent.broadcast.start({})
+silent.broadcast.addViewer('quiet')
+assert.equal(silent.events.errors.length, 0, 'the source must be given time before being declared dead')
+await new Promise((resolve) => setTimeout(resolve, 60))
+assert.deepEqual(silent.events.errors, [], 'and not judged after 60ms')
+
+const fast = setup()
+const quick = createNativeBroadcast({
+  onOffer: () => {},
+  onError: (id, reason) => fast.events.errors.push({ id, reason }),
+  onViewerGone: (id) => fast.events.gone.push(id),
+  bridgeFactory: fast.bridge.factory,
+  startPipeline: () => { const c = new EventEmitter(); c.kill = () => {}; return c },
+  firstFrameTimeoutMs: 30,
+})
+await quick.start({})
+quick.addViewer('quiet')
+await new Promise((resolve) => setTimeout(resolve, 80))
+assert.deepEqual(fast.events.errors, [{ id: 'quiet', reason: 'no-frames' }])
+assert.equal(quick.viewerCount, 0, 'a source producing nothing must not keep a pipeline alive')
+
+// An offer arriving in time proves the source is live and must cancel the verdict.
+const lively = setup()
+const alive = createNativeBroadcast({
+  onOffer: () => {},
+  onError: (id, reason) => lively.events.errors.push({ id, reason }),
+  bridgeFactory: lively.bridge.factory,
+  startPipeline: () => { const c = new EventEmitter(); c.kill = () => {}; return c },
+  firstFrameTimeoutMs: 40,
+})
+await alive.start({})
+alive.addViewer('loud')
+lively.bridge.handlers.onOffer('s1', 'v=0 offer')
+await new Promise((resolve) => setTimeout(resolve, 90))
+assert.deepEqual(lively.events.errors, [], 'a source that offered must never be reported as silent')
+assert.equal(alive.viewerCount, 1)
+
+console.log('PASS: per-viewer sessions and pipelines, id routing, silent-source detection, isolated failures, clean stop and missing-GStreamer fallback.')

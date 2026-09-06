@@ -384,7 +384,9 @@ export default function App() {
       },
       onError: (_connectionId, reason) => setNotice(reason === 'gstreamer-missing'
         ? 'A captura nativa não está disponível nesta máquina. Desligue a opção para transmitir pelo navegador.'
-        : 'Um espectador não pôde ser conectado pela captura nativa.'),
+        : reason === 'no-frames'
+          ? 'A fonte escolhida não produziu imagem. Uma janela precisa estar visível para ser capturada — minimizada, coberta ou em tela cheia exclusiva ela não gera quadros. Tente a tela inteira.'
+          : 'Um espectador não pôde ser conectado pela captura nativa.'),
     })
     nativeRef.current = native
     return () => { native.dispose(); nativeRef.current = null }

@@ -846,7 +846,15 @@ export default function App() {
     if (shareAudio) {
       try { stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: audioConstraints, systemAudio: 'include', windowAudio: 'window', surfaceSwitching: 'include' }) }
       catch (error) {
-        if (error?.name === 'NotAllowedError') throw error
+        // The retry exists for one reason: systemAudio and windowAudio are not accepted everywhere, and
+        // asking again without them still gets a picture. Only those failures may retry.
+        //
+        // Listing what must not retry instead was the bug: cancelling the picker rejects with whatever
+        // name the runtime happens to use, and any name outside that list opened the picker a second
+        // time. Cancelling closed the window and it reappeared seconds later, which reads as the app
+        // ignoring the answer -- so the condition is an allowlist now, and an unrecognised failure is
+        // reported rather than answered with another prompt.
+        if (!['TypeError', 'NotSupportedError', 'OverconstrainedError'].includes(error?.name)) throw error
         stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: true })
       }
     } else stream = await navigator.mediaDevices.getDisplayMedia({ ...picker, video, audio: false })
@@ -897,7 +905,9 @@ export default function App() {
         : stream.getAudioTracks().length ? 'Sua transmissão está disponível para todos na sala, com o áudio do que você escolheu compartilhar.'
         : 'Transmissão iniciada, mas a origem escolhida não forneceu áudio. Tente uma aba ou use uma opção de áudio oferecida pelo navegador.')
     }
-    catch (error) { setNotice(error?.name === 'NotAllowedError' ? 'Você cancelou a escolha da tela.' : 'Não foi possível iniciar a captura.') }
+    // Cancelling reaches here under more than one name depending on the runtime, and telling someone the
+    // capture failed when they simply changed their mind sends them looking for a fault that is not there.
+    catch (error) { setNotice(['NotAllowedError', 'AbortError'].includes(error?.name) ? 'Você cancelou a escolha da tela.' : error?.name === 'NotFoundError' ? 'Nenhuma tela ou janela foi encontrada para compartilhar.' : 'Não foi possível iniciar a captura.') }
   }
   const shareWith = async (peerId, mode = 'auto') => {
     let entry, phase = 'create-sender'

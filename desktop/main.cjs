@@ -16,6 +16,8 @@ const APP_URL = localAppUrl || 'https://telasshare.onrender.com'
 
 // Apply one list per switch: appendSwitch replaces a previous value for the same switch.
 const { mediaFeaturePolicy, createMediaRuntimeLog } = require('./mediaRuntime.cjs')
+const { findGstreamer } = require('./nativeCapture.cjs')
+const { createNativeBroadcast } = require('./nativeBroadcast.cjs')
 const mediaPolicy = mediaFeaturePolicy()
 const mediaRuntime = createMediaRuntimeLog(mediaPolicy)
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default')
@@ -27,6 +29,7 @@ app.on('child-process-gone', (_event, details) => {
 const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow
 let processAudioCapture = null
+let nativeBroadcast = null
 let updateWindow = null
 let postponedUpdateVersion = null
 
@@ -156,6 +159,29 @@ function configureSession() {
   })
 }
 
+// These start processes and open a loopback listener, so they answer only the real page, never a frame
+// that talked its way into the window.
+const fromTrustedPage = (event) => event.sender === mainWindow?.webContents
+  && event.senderFrame === event.sender.mainFrame
+  && isTrustedUrl(event.senderFrame.url)
+
+const toPage = (channel, ...args) => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args)
+}
+
+// Built once and kept: the renderer owns the signalling socket, so everything this emits is something
+// the page should put on the wire, and every answer comes back the same way.
+function nativeBroadcastInstance() {
+  if (nativeBroadcast) return nativeBroadcast
+  nativeBroadcast = createNativeBroadcast({
+    onOffer: (connectionId, sdp) => toPage('native-offer', connectionId, sdp),
+    onCandidate: (connectionId, candidate) => toPage('native-candidate', connectionId, candidate),
+    onViewerGone: (connectionId) => toPage('native-viewer-gone', connectionId),
+    onError: (connectionId, reason) => toPage('native-error', connectionId, reason),
+  })
+  return nativeBroadcast
+}
+
 function configureAudioBridge() {
   // The page cannot read the installed version on its own, and the app updates on a different schedule
   // than the site it loads, so both numbers have to be visible to tell a stale half from a fresh one.
@@ -166,6 +192,31 @@ function configureAudioBridge() {
   })
   ipcMain.handle('window-audio-active', () => Boolean(processAudioCapture))
   ipcMain.on('window-audio-stop', stopProcessAudioCapture)
+
+  // Native capture keeps the frame on the GPU instead of paying Chromium's readback, but it is opt-in:
+  // the page only offers the choice when this says the toolchain is actually installed.
+  ipcMain.handle('native-capture-available', (event) => fromTrustedPage(event) && findGstreamer() !== null)
+  ipcMain.handle('native-broadcast-start', async (event, options) => {
+    if (!fromTrustedPage(event) || findGstreamer() === null) return false
+    try { return await nativeBroadcastInstance().start(options && typeof options === 'object' ? options : {}) }
+    catch { return false }
+  })
+  ipcMain.handle('native-viewer-add', (event, connectionId) =>
+    fromTrustedPage(event) && typeof connectionId === 'string' && nativeBroadcastInstance().addViewer(connectionId))
+  ipcMain.handle('native-viewer-answer', (event, connectionId, sdp) =>
+    fromTrustedPage(event) && typeof connectionId === 'string' && nativeBroadcastInstance().answer(connectionId, sdp))
+  ipcMain.on('native-viewer-remove', (event, connectionId) => {
+    if (fromTrustedPage(event) && typeof connectionId === 'string') nativeBroadcastInstance().removeViewer(connectionId)
+  })
+  ipcMain.on('native-broadcast-stop', (event) => { if (fromTrustedPage(event)) stopNativeBroadcast() })
+}
+
+// Nothing may outlive the window that asked for it: a pipeline left running holds the capture and the
+// GPU encoder, and the bridge would keep a port open for a page that no longer exists.
+function stopNativeBroadcast() {
+  const running = nativeBroadcast
+  nativeBroadcast = null
+  running?.stop().catch(() => {})
 }
 
 function createWindow() {
@@ -302,6 +353,7 @@ function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
   stopProcessAudioCapture()
+  stopNativeBroadcast()
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.destroy()
   }

@@ -81,6 +81,21 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character])
 }
 
+// Windows the app opens belong over the app, not wherever the primary monitor happens to be. Someone
+// broadcasting from a second screen was getting these on a monitor they were not looking at -- and on
+// top of the very thing they were sharing. Clamped to the work area of the display the app is on, since
+// centring a window larger than the app would otherwise push part of it off the edge.
+function centredOnApp(width, height) {
+  if (!mainWindow || mainWindow.isDestroyed()) return {}
+  const over = mainWindow.getBounds()
+  const area = screen.getDisplayMatching(over).workArea
+  const clamp = (value, min, max) => Math.round(Math.min(Math.max(value, min), max))
+  return {
+    x: clamp(over.x + (over.width - width) / 2, area.x, area.x + Math.max(0, area.width - width)),
+    y: clamp(over.y + (over.height - height) / 2, area.y, area.y + Math.max(0, area.height - height)),
+  }
+}
+
 function showSourcePicker(sources, audioRequested) {
   return new Promise((resolve) => {
     let finished = false
@@ -89,6 +104,7 @@ function showSourcePicker(sources, audioRequested) {
       modal: true,
       width: 940,
       height: 680,
+      ...centredOnApp(940, 680),
       minWidth: 680,
       minHeight: 520,
       show: false,
@@ -320,18 +336,12 @@ function showUpdateReady(updateInfo) {
   if (postponedUpdateVersion === updateInfo?.version) return
   if (updateWindow && !updateWindow.isDestroyed()) { updateWindow.focus(); return }
   const version = escapeHtml(updateInfo?.version || 'mais recente')
-  // Centred on the app rather than on the primary monitor: someone broadcasting from a second screen
-  // was getting this over a monitor they were not looking at, on top of whatever they were sharing.
-  const over = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null
-  const size = { width: 520, height: 390 }
   updateWindow = new BrowserWindow({
     parent: mainWindow,
     modal: true,
-    ...size,
-    ...(over ? {
-      x: Math.round(over.x + (over.width - size.width) / 2),
-      y: Math.round(over.y + (over.height - size.height) / 2),
-    } : {}),
+    width: 520,
+    height: 390,
+    ...centredOnApp(520, 390),
     resizable: false,
     maximizable: false,
     minimizable: false,

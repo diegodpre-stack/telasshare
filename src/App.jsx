@@ -92,6 +92,24 @@ const withStartBitrate = (sdp, startKbps) => {
   return result.join('\r\n')
 }
 
+// Gathering normally finishes in well under a second, but a browser that never reports completion must
+// not hold an answer forever: past this the candidates found so far are better than no answer at all.
+const ICE_GATHER_TIMEOUT_MS = 4_000
+function iceGathered(pc) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve()
+  return new Promise((resolve) => {
+    let timer
+    const done = () => {
+      if (pc.iceGatheringState !== 'complete') return
+      pc.removeEventListener('icegatheringstatechange', done)
+      clearTimeout(timer)
+      resolve()
+    }
+    pc.addEventListener('icegatheringstatechange', done)
+    timer = setTimeout(() => { pc.removeEventListener('icegatheringstatechange', done); resolve() }, ICE_GATHER_TIMEOUT_MS)
+  })
+}
+
 const audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
 
 async function attachDesktopWindowAudio(stream, onError) {
@@ -370,7 +388,7 @@ export default function App() {
     const native = createNativeBroadcast({
       onOffer: (connectionId, sdp) => {
         const peerId = nativeViewersRef.current.get(connectionId)
-        if (peerId) send({ type: 'signal', to: peerId, connectionId, mode: 'auto', description: { type: 'offer', sdp } })
+        if (peerId) send({ type: 'signal', to: peerId, connectionId, mode: 'auto', nativeSender: true, description: { type: 'offer', sdp } })
       },
       onCandidate: (connectionId, candidate) => {
         const peerId = nativeViewersRef.current.get(connectionId)
@@ -686,6 +704,13 @@ export default function App() {
         if (message.description.type === 'offer') {
           phase = 'create-answer'; const answer = await entry.pc.createAnswer()
           phase = 'set-local-answer'; await entry.pc.setLocalDescription(answer)
+          // A native sender cannot be trickled to: WHIP carries the answer and nothing after it, so the
+          // candidates sent separately below are dropped on arrival. With none of ours, it never sends a
+          // check of its own and stays passive, and the checks we send reach a NAT that has no reason to
+          // let them through -- the connection simply never completes. So wait for gathering and answer
+          // with everything inside. Only for those offers: the ordinary path trickles, and delaying every
+          // answer would slow down every connection to fix one that does not exist there.
+          if (message.nativeSender) await iceGathered(entry.pc)
           send({ type: 'signal', to: message.from, connectionId: message.connectionId, description: entry.pc.localDescription })
         }
       } else if (message.candidate) {

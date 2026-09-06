@@ -299,11 +299,14 @@ wss.on('connection', (socket, request) => {
       if (message.turnTransport !== undefined && !['direct', 'udp', 'all'].includes(message.turnTransport)) return safeSend(socket, { type: 'error', message: 'Transporte inválido.' })
       if (message.allowDirect !== undefined && typeof message.allowDirect !== 'boolean') return safeSend(socket, { type: 'error', message: 'Política de conexão inválida.' })
       if (message.mode !== undefined && !['auto', 'p2p', 'turn'].includes(message.mode)) return safeSend(socket, { type: 'error', message: 'Modo de conexão inválido.' })
+      // A native sender receives no trickled candidates -- WHIP has no channel for them -- so the viewer
+      // has to put all of its own inside the answer. It can only know to do that if the offer says so.
+      if (message.nativeSender !== undefined && typeof message.nativeSender !== 'boolean') return safeSend(socket, { type: 'error', message: 'Origem de captura inválida.' })
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })
       const descriptionOk = message.description === undefined || validDescription(message.description)
       const candidateOk = message.candidate === undefined || validCandidate(message.candidate)
       if (!descriptionOk || !candidateOk || (message.description === undefined && message.candidate === undefined)) return safeSend(socket, { type: 'error', message: 'Sinal WebRTC inválido.' })
-      return safeSend(target.socket, { type: 'signal', from: id, connectionId: message.connectionId, mode: message.mode, turnTransport: message.turnTransport, allowDirect: message.allowDirect, description: message.description, candidate: message.candidate })
+      return safeSend(target.socket, { type: 'signal', from: id, connectionId: message.connectionId, mode: message.mode, turnTransport: message.turnTransport, allowDirect: message.allowDirect, nativeSender: message.nativeSender, description: message.description, candidate: message.candidate })
     }
     if (message.type === 'stop') {
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })

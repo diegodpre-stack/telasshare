@@ -154,11 +154,12 @@ async function chooseDisplaySource(request, callback) {
 // Matching through screen.getAllDisplays() instead was the bug behind every native broadcast showing
 // the primary monitor: that list is ordered differently from the capture indices, so nothing matched
 // and the fallback took over. The id is the authority, not the display list.
-function describeSource(source) {
+function describeSource(source, audio) {
   const window = /^window:(\d+):/.exec(source.id)
-  if (window) return { kind: 'window', windowHandle: Number(window[1]), name: source.name }
+  const chosen = { audio: audio === true, name: source.name }
+  if (window) return { ...chosen, kind: 'window', windowHandle: Number(window[1]) }
   const display = /^screen:(\d+):/.exec(source.id)
-  return { kind: 'monitor', monitorIndex: display ? Number(display[1]) : 0, name: source.name }
+  return { ...chosen, kind: 'monitor', monitorIndex: display ? Number(display[1]) : 0 }
 }
 
 function configureSession() {
@@ -212,10 +213,10 @@ function configureAudioBridge() {
   // Native capture keeps the frame on the GPU instead of paying Chromium's readback, but it is opt-in:
   // the page only offers the choice when this says the toolchain is actually installed.
   ipcMain.handle('native-capture-available', (event) => fromTrustedPage(event) && findGstreamer() !== null)
-  // The same picker the browser path uses, so choosing a source feels identical either way. Audio is
-  // not offered here yet: the native pipeline carries video only, and a checkbox that did nothing
-  // would be worse than its absence.
-  ipcMain.handle('native-pick-source', async (event) => {
+  // The same picker the browser path uses, so choosing a source feels identical either way -- including
+  // the audio checkbox, whose answer decides this broadcast rather than a setting made earlier
+  // elsewhere. Offering it and ignoring it was worse than not offering it at all.
+  ipcMain.handle('native-pick-source', async (event, audioRequested) => {
     if (!fromTrustedPage(event)) return null
     try {
       const sources = await desktopCapturer.getSources({
@@ -224,8 +225,8 @@ function configureAudioBridge() {
         fetchWindowIcons: true,
       })
       if (!sources.length) return null
-      const result = await showSourcePicker(sources, false)
-      return result ? describeSource(result.source) : null
+      const result = await showSourcePicker(sources, audioRequested === true)
+      return result ? describeSource(result.source, audioRequested === true && result.audio) : null
     } catch { return null }
   })
   ipcMain.handle('native-broadcast-start', async (event, options) => {
@@ -319,11 +320,18 @@ function showUpdateReady(updateInfo) {
   if (postponedUpdateVersion === updateInfo?.version) return
   if (updateWindow && !updateWindow.isDestroyed()) { updateWindow.focus(); return }
   const version = escapeHtml(updateInfo?.version || 'mais recente')
+  // Centred on the app rather than on the primary monitor: someone broadcasting from a second screen
+  // was getting this over a monitor they were not looking at, on top of whatever they were sharing.
+  const over = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null
+  const size = { width: 520, height: 390 }
   updateWindow = new BrowserWindow({
     parent: mainWindow,
     modal: true,
-    width: 520,
-    height: 390,
+    ...size,
+    ...(over ? {
+      x: Math.round(over.x + (over.width - size.width) / 2),
+      y: Math.round(over.y + (over.height - size.height) / 2),
+    } : {}),
     resizable: false,
     maximizable: false,
     minimizable: false,

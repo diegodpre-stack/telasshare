@@ -660,7 +660,15 @@ export default function App() {
     // the offer already carries the pipeline's own, and the checks the viewer sends against them arrive
     // as peer-reflexive candidates, which is what actually forms the pair.
     if (nativeViewersRef.current.has(message.connectionId)) {
-      if (message.description?.type === 'answer') await nativeRef.current?.answer(message.connectionId, message.description.sdp)
+      if (message.description?.type === 'answer') {
+        const accepted = await nativeRef.current?.answer(message.connectionId, message.description.sdp)
+        // The pipeline exposes no ICE state, so this is the last thing the page can observe: the viewer
+        // answered. If the negotiation then fails, whipsink ends the session and the viewer disappears
+        // from the list -- so a viewer still shown is one still connected, which is what was being asked.
+        if (accepted) setViewers((current) => current[message.connectionId]
+          ? { ...current, [message.connectionId]: { ...current[message.connectionId], route: 'native' } }
+          : current)
+      }
       return
     }
     let entry, phase = 'create-receiver'
@@ -912,12 +920,12 @@ export default function App() {
     if (nativeWanted && nativeAvailable && nativeRef.current) {
       // Ask before starting anything: closing the picker is an answer, and it must not fall through to
       // the browser path and open a second one.
-      const source = await nativeRef.current.pickSource()
+      const source = await nativeRef.current.pickSource(shareAudio)
       if (!source) { setNotice('Você cancelou a escolha da tela.'); return }
       const started = await nativeRef.current.start({
         monitorIndex: source.monitorIndex ?? 0,
         windowHandle: source.windowHandle ?? null,
-        audio: shareAudio,
+        audio: source.audio === true,
         // The pipeline has its own ICE agent and knows nothing of what the app negotiated, so the same
         // servers the browser path uses have to be handed to it explicitly.
         ...nativeIceServers(iceServersRef.current),
@@ -930,9 +938,9 @@ export default function App() {
         // Set before the state, not with it: a watch-request can arrive in the same tick, and a
         // render behind would send that viewer down the Chromium path with no capture behind it.
         nativeActiveRef.current = true
-        setNativeActive(true); setAudioStatus(shareAudio ? 'on' : 'off'); setBroadcasting(true); send({ type: 'broadcast-start' })
+        setNativeActive(true); setAudioStatus(source.audio ? 'on' : 'off'); setBroadcasting(true); send({ type: 'broadcast-start' })
         mediaEvents.record('native-broadcast-started', { fps })
-        setNotice(shareAudio ? 'Transmitindo com captura nativa, incluindo o som do sistema.' : 'Transmitindo com captura nativa, sem áudio.')
+        setNotice(source.audio ? 'Transmitindo com captura nativa, incluindo o som do sistema.' : 'Transmitindo com captura nativa, sem áudio.')
         return
       }
       setNotice('A captura nativa não iniciou. Usando a captura do navegador para esta transmissão.')
@@ -1031,7 +1039,7 @@ export default function App() {
   }
   const viewerNames = [...new Set(Object.values(viewers).map((viewer) => userName(viewer.peerId)))]
   const viewerRoutes = [...new Set(Object.values(viewers).map((viewer) => viewer.route).filter((route) => route && route !== 'connecting'))]
-  const routeBaseLabel = !viewerNames.length ? 'sem espectadores' : viewerRoutes.length === 0 ? 'detectando conexão' : viewerRoutes.length > 1 ? 'conexão mista: P2P + TURN' : viewerRoutes[0] === 'turn' ? 'servidor auxiliar (TURN)' : 'conexão direta P2P'
+  const routeBaseLabel = !viewerNames.length ? 'sem espectadores' : viewerRoutes.length === 0 ? 'detectando conexão' : viewerRoutes.every((route) => route === 'native') ? 'assistindo · rota não medida na captura nativa' : viewerRoutes.length > 1 ? 'conexão mista: P2P + TURN' : viewerRoutes[0] === 'turn' ? 'servidor auxiliar (TURN)' : 'conexão direta P2P'
   const routeDetails = Object.values(viewers).map((viewer) => `${userName(viewer.peerId)}: ${[viewer.route === 'turn' ? 'TURN' : viewer.route === 'p2p' ? 'P2P' : '', viewer.route === 'turn' ? viewer.relayProtocol || viewer.protocol : viewer.protocol, Number.isFinite(viewer.fps) ? `${viewer.fps} FPS` : '', Number.isFinite(viewer.sentMbps) ? `${viewer.sentMbps} Mbps enviados` : '', Number.isFinite(viewer.rttMs) ? `${viewer.rttMs} ms` : '', Number.isFinite(viewer.availableMbps) ? `${viewer.availableMbps} Mbps disponíveis` : '', viewer.limitation ? `limite: ${viewer.limitation}` : ''].filter(Boolean).join(' · ')}`)
   const routeLabel = `${routeBaseLabel}${routeDetails.length ? ` · ${routeDetails.join(' / ')}` : ''}`
   const outboundFpsValues = Object.values(viewers).map((viewer) => viewer.fps).filter(Number.isFinite)
@@ -1046,7 +1054,7 @@ export default function App() {
     <BuildStamp />
     {showSelfPreview && (nativeActive ? previewStream : localStreamRef.current) && <SelfPreview stream={nativeActive ? previewStream : localStreamRef.current} routeLabel={routeLabel} outboundFpsLabel={outboundFpsLabel} onClose={closeSelfPreview} />}
     {!isBroadcasting && <button className="start-broadcast standalone" onClick={startBroadcast}><Radio size={18} />Iniciar transmissão</button>}
-    {isBroadcasting && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {nativeActive ? `captura nativa${nativeSourceName ? ` · ${nativeSourceName}` : ''}` : resolutions[resolution].label} · preferência {fps} FPS · {nativeActive ? (shareAudio ? 'com som do sistema' : 'sem áudio') : audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={openSelfPreview}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
+    {isBroadcasting && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {nativeActive ? `captura nativa${nativeSourceName ? ` · ${nativeSourceName}` : ''}` : resolutions[resolution].label} · preferência {fps} FPS · {nativeActive ? (audioStatus === 'on' ? 'com som do sistema' : 'sem áudio') : audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={openSelfPreview}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
     <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>

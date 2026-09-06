@@ -11,6 +11,7 @@ const api = {
   addNativeViewer: async (id) => { calls.push(['add', id]); return id !== 'refused' },
   answerNativeViewer: async (id, sdp) => { calls.push(['answer', id, sdp]); return true },
   removeNativeViewer: (id) => calls.push(['remove', id]),
+  pickNativeSource: async (audioRequested) => { calls.push(['pick', audioRequested]); return { kind: 'monitor', monitorIndex: 0, audio: audioRequested, name: 'Tela 1' } },
   onNativeOffer: (cb) => { handlers.offer = cb; return () => { handlers.offer = null } },
   onNativeCandidate: (cb) => { handlers.candidate = cb; return () => { handlers.candidate = null } },
   onNativeViewerGone: (cb) => { handlers.gone = cb; return () => { handlers.gone = null } },
@@ -74,8 +75,15 @@ const native = createNativeBroadcast({
   onError: (id, reason) => seen.errors.push([id, reason]),
 })
 
+// The picker's audio answer has to reach the main process, or the checkbox decides nothing and sound is
+// shared whatever anyone ticked.
+assert.deepEqual(await native.pickSource(true), { kind: 'monitor', monitorIndex: 0, audio: true, name: 'Tela 1' })
+assert.deepEqual(calls.at(-1), ['pick', true])
+assert.equal((await native.pickSource()).audio, false, 'silence unless asked for')
+assert.deepEqual(calls.at(-1), ['pick', false], 'a missing argument must not reach the picker as undefined')
+
 assert.equal(await native.start({ fps: 60 }), true)
-assert.deepEqual(calls[0], ['start', { fps: 60 }])
+assert.deepEqual(calls.at(-1), ['start', { fps: 60 }])
 
 // --- a real viewer's signalling must reach the caller untouched -----------
 await handlers.offer('c1', 'v=0 offer')
@@ -131,4 +139,4 @@ assert.ok(calls.some(([kind]) => kind === 'stop'))
 native.dispose()
 assert.equal(handlers.offer, null, 'listeners must be released, or a second broadcast gets two of each')
 
-console.log('PASS: ICE servers translated for the pipeline, viewer signalling forwarded, preview answered locally, preview pipeline released on close, listeners disposed.')
+console.log('PASS: ICE servers translated for the pipeline, audio answered by the picker, viewer signalling forwarded, preview answered locally, preview pipeline released on close, listeners disposed.')

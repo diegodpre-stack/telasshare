@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', Object.freeze({
   // candidates to send and receives the answers that come back -- the pipeline never talks to the
   // server itself. isNativeCaptureAvailable is what decides whether the option is offered at all.
   isNativeCaptureAvailable: () => ipcRenderer.invoke('native-capture-available'),
-  pickNativeSource: () => ipcRenderer.invoke('native-pick-source'),
+  pickNativeSource: (audioRequested) => ipcRenderer.invoke('native-pick-source', audioRequested),
   startNativeBroadcast: (options) => ipcRenderer.invoke('native-broadcast-start', options),
   stopNativeBroadcast: () => ipcRenderer.send('native-broadcast-stop'),
   addNativeViewer: (connectionId) => ipcRenderer.invoke('native-viewer-add', connectionId),

@@ -64,31 +64,10 @@ assert.equal((await call(port, 'PATCH', `/whip/${a.id}`, 'm=video 9 x\r\na=mid:v
 assert.equal(candidates.length, 1)
 assert.equal(candidates[0].id, a.id)
 
-// --- an empty seat waits, a taken one does not ----------------------------
-// A seat in a shared pipeline offers as soon as the pipeline runs, long before anyone sits in it. Timing
-// that out would spend the seat on a viewer who never existed.
-const seat = bridge.createSession({ armed: false })
-const seatPost = call(port, 'POST', `/whip/${seat.id}`, OFFER)
-await new Promise((resolve) => setTimeout(resolve, 500))
-assert.ok(offers.some(({ id }) => id === seat.id), 'the seat offers immediately')
-// The armed timeout is 400ms here, so an armed seat would already have given up by now.
-assert.equal(bridge.hasSession(seat.id), true, 'an empty seat must still be waiting')
-assert.equal(bridge.arm(seat.id), true)
-assert.equal(bridge.arm(seat.id), false, 'arming twice must not stack two clocks')
-assert.equal(bridge.provideAnswer(seat.id, ANSWER), true)
-assert.equal((await seatPost).status, 201)
-
-// Arming a seat nobody answers does end it, which is what the clock is for.
-const abandonedSeat = bridge.createSession({ armed: false })
-const abandonedPost = call(port, 'POST', `/whip/${abandonedSeat.id}`, OFFER)
-await new Promise((resolve) => setTimeout(resolve, 60))
-bridge.arm(abandonedSeat.id)
-assert.equal((await abandonedPost).status, 504)
-
 // A viewer who never answers must release the pipeline instead of holding it for the whole broadcast.
 const abandoned = await call(port, 'POST', `/whip/${b.id}`, OFFER)
 assert.equal(abandoned.status, 504)
-assert.equal(offers.filter(({ id }) => id === b.id).length, 1, 'its offer still reached the app before it gave up')
+assert.equal(offers.length, 2)
 
 // The sender ending its session is the app's cue to drop the viewer.
 assert.equal((await call(port, 'DELETE', `/whip/${a.id}`)).status, 204)
@@ -104,4 +83,4 @@ assert.equal((await call(port, 'POST', `/whip/${c.id}`, 'this is not an sdp')).s
 await bridge.close()
 await assert.rejects(call(port, 'POST', `/whip/${a.id}`, OFFER), 'the bridge must not outlive close()')
 
-console.log('PASS: empty seats wait and armed ones do not, per-viewer sessions, offer held for the answer, absolute Location, trickle routing, abandoned-viewer timeout and clean shutdown.')
+console.log('PASS: per-viewer sessions, offer held for the answer, absolute Location, trickle routing, abandoned-viewer timeout and clean shutdown.')

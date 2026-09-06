@@ -73,47 +73,37 @@ const audioArgs = ({ excludePid, allowProcessLoopback }) => {
   if (allowProcessLoopback && Number.isInteger(excludePid) && excludePid > 0) {
     source.push('loopback-mode=exclude-process-tree', `loopback-target-pid=${excludePid}`)
   }
-  return [...source, '!', 'audioconvert', '!', 'audioresample', '!', 'opusenc', '!', 'tee', 'name=at']
+  return [
+    ...source,
+    '!', 'audioconvert',
+    '!', 'audioresample',
+    '!', 'opusenc',
+    '!', 'rtpopuspay', 'pt=97',
+    '!', 'application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000,encoding-params=(string)2',
+    '!', 'queue',
+    '!', 'ws.',
+  ]
 }
-
-// One encoded stream, packetised once per viewer. Payloading is per-branch because each RTP session
-// needs its own sequence numbers and SSRC; the encoding above it is shared, which is the whole point --
-// four viewers used to mean four captures and four encodes.
-const videoBranch = (index) => [
-  'vt.', '!', 'queue',
-  '!', 'rtph264pay', 'aggregate-mode=zero-latency', 'config-interval=-1', 'pt=96',
-  '!', 'application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000',
-  '!', `ws${index}.`,
-]
-
-const audioBranch = (index) => [
-  'at.', '!', 'queue',
-  '!', 'rtpopuspay', 'pt=97',
-  '!', 'application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000,encoding-params=(string)2',
-  '!', `ws${index}.`,
-]
 
 // One encoder, one WHIP session. Phase 3 turns this into a tee feeding several sinks; the encoder
 // settings below stay shared, which is the point -- today the app encodes once per viewer.
 function buildPipelineArgs({
-  endpoint, endpoints, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true,
+  endpoint, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true,
   audio = false, excludePid = null, allowProcessLoopback = false,
   stunServer = null, turnServer = null,
 } = {}) {
-  const targets = (Array.isArray(endpoints) ? endpoints : [endpoint]).filter((value) => typeof value === 'string' && value)
-  if (!targets.length) throw new Error('endpoint is required')
-  const stun = typeof stunServer === 'string' && /^stuns?:\/\//i.test(stunServer) ? [`stun-server=${stunServer}`] : []
-  const turn = typeof turnServer === 'string' && /^turns?:\/\//i.test(turnServer) ? [`turn-server=${turnServer}`] : []
+  if (!endpoint) throw new Error('endpoint is required')
   return [
     '-e',
-    // One sink per viewer, all named up front so the branches below can find them. gst-launch builds a
-    // fixed pipeline and cannot grow one later, so the seats exist from the start and each waits, its
-    // offer held by the bridge, until somebody sits in it.
+    // Named first so both branches can link into it. Sound and picture are separate sources at separate
+    // rates, so each ends in its own queue: sharing one thread lets the slower branch stall the faster.
     //
-    // Without a STUN server these gather host candidates only -- private addresses that work on loopback
+    // Without a STUN server this gathers host candidates only -- private addresses that work on loopback
     // and are unreachable from anywhere else, so a viewer over the internet waits at "connecting" until
     // it gives up. TURN carries the networks where even that is not enough.
-    ...targets.flatMap((target, index) => ['whipsink', `name=ws${index}`, `whip-endpoint=${target}`, ...stun, ...turn]),
+    'whipsink', 'name=ws', `whip-endpoint=${endpoint}`,
+    ...(typeof stunServer === 'string' && /^stuns?:\/\//i.test(stunServer) ? [`stun-server=${stunServer}`] : []),
+    ...(typeof turnServer === 'string' && /^turns?:\/\//i.test(turnServer) ? [`turn-server=${turnServer}`] : []),
     'd3d11screencapturesrc',
     ...sourceArgs({ windowHandle, monitorIndex }),
     `show-cursor=${showCursor ? 'true' : 'false'}`,
@@ -127,15 +117,13 @@ function buildPipelineArgs({
     '!', 'amfh264enc', `bitrate=${positiveInt(bitrateKbps, 12_000)}`, 'cabac=false', 'b-frames=0',
     '!', 'video/x-h264,profile=constrained-baseline',
     '!', 'h264parse', 'config-interval=-1',
+    '!', 'rtph264pay', 'aggregate-mode=zero-latency', 'config-interval=-1', 'pt=96',
+    '!', 'application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000',
+    '!', 'queue',
     // whipsink rather than whipclientsink: the latter wraps webrtcsink, whose codec discovery fails on
     // D3D11 memory and which rejects already-encoded input with "not-negotiated" once a viewer attaches.
-    // The cost of that choice is this tee, since whipsink serves one viewer where webrtcsink serves many.
-    '!', 'tee', 'name=vt',
-    ...targets.flatMap((_target, index) => videoBranch(index)),
-    ...(audio ? [
-      ...audioArgs({ excludePid, allowProcessLoopback }),
-      ...targets.flatMap((_target, index) => audioBranch(index)),
-    ] : []),
+    '!', 'ws.',
+    ...(audio ? audioArgs({ excludePid, allowProcessLoopback }) : []),
   ]
 }
 

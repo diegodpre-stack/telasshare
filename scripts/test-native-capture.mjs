@@ -85,45 +85,11 @@ assert.ok(withAudio.includes('opusenc') && withAudio.includes('rtpopuspay'))
 // Browsers need Opus at 48k stereo, and the payload type must not collide with the video's.
 assert.ok(withAudio.includes('encoding-name=OPUS') && withAudio.includes('clock-rate=48000'))
 assert.ok(withAudio.includes('payload=97') && withAudio.includes('payload=96'))
-// Both branches link into the viewer's sink, each through its own queue: sharing a thread lets the
-// slower branch stall the faster, which on a live broadcast is a stutter in whichever loses.
-assert.equal((withAudio.match(/! ws0\./g) || []).length, 2, 'sound and picture must both reach the sink')
+// Both branches link into one named sink, each through its own queue: sharing a thread lets the slower
+// branch stall the faster, which on a live broadcast is a stutter in whichever loses.
+assert.equal((withAudio.match(/! ws\./g) || []).length, 2, 'sound and picture must both reach the sink')
 assert.equal((withAudio.match(/queue/g) || []).length, 2, 'each branch needs its own queue')
-assert.ok(withAudio.includes('whipsink name=ws0'), 'the sink has to be named for either branch to find it')
-
-// --- one capture for several viewers --------------------------------------
-// Four friends used to mean four captures and four encodes. gst-launch cannot grow a pipeline once it
-// starts, so the seats are built up front and each is fed from a tee below the single encoder.
-const shared = buildPipelineArgs({ endpoints: ['http://a/1', 'http://b/2', 'http://c/3'], audio: true }).join(' ')
-assert.equal((shared.match(/d3d11screencapturesrc/g) || []).length, 1, 'one capture, however many viewers')
-assert.equal((shared.match(/amfh264enc/g) || []).length, 1, 'and one encode -- this is the whole point')
-assert.equal((shared.match(/opusenc/g) || []).length, 1, 'sound is encoded once too')
-assert.equal((shared.match(/whipsink/g) || []).length, 3, 'one sink per viewer, since whipsink serves one')
-assert.ok(shared.includes('tee name=vt') && shared.includes('tee name=at'))
-// Payloading is per-branch: each RTP session needs its own sequence numbers and SSRC.
-assert.equal((shared.match(/rtph264pay/g) || []).length, 3)
-assert.equal((shared.match(/rtpopuspay/g) || []).length, 3)
-for (const index of [0, 1, 2]) {
-  assert.ok(shared.includes(`whipsink name=ws${index} whip-endpoint=`), `seat ${index} needs its own sink`)
-  assert.equal((shared.match(new RegExp(`! ws${index}\.`, 'g')) || []).length, 2, `seat ${index} takes both branches`)
-}
-// Silent broadcasts get no audio tee at all rather than an idle one.
-const sharedSilent = buildPipelineArgs({ endpoints: ['http://a/1', 'http://b/2'] }).join(' ')
-assert.ok(!sharedSilent.includes('tee name=at') && !sharedSilent.includes('rtpopuspay'))
-assert.equal((sharedSilent.match(/! ws1\./g) || []).length, 1, 'a silent seat takes the video branch only')
-
-// Every seat must carry the ICE servers, or the seats past the first offer unreachable candidates.
-const sharedIce = buildPipelineArgs({
-  endpoints: ['http://a/1', 'http://b/2'],
-  stunServer: 'stun://s:1', turnServer: 'turn://u:p@t:2',
-}).join(' ')
-assert.equal((sharedIce.match(/stun-server=/g) || []).length, 2)
-assert.equal((sharedIce.match(/turn-server=/g) || []).length, 2)
-
-// A single endpoint still works, since overflow viewers get a pipeline of their own.
-assert.equal((buildPipelineArgs({ endpoint: 'http://x/whip' }).join(' ').match(/whipsink/g) || []).length, 1)
-assert.throws(() => buildPipelineArgs({ endpoints: [] }), /endpoint is required/)
-assert.throws(() => buildPipelineArgs({ endpoints: [null, ''] }), /endpoint is required/, 'junk is not an endpoint')
+assert.ok(withAudio.includes('whipsink name=ws'), 'the sink has to be named for either branch to find it')
 
 // Excluding this app keeps the friends being listened to out of what is sent back to them.
 const excluded = buildPipelineArgs({ endpoint: 'http://x/whip', audio: true, excludePid: 4321, allowProcessLoopback: true }).join(' ')
@@ -180,4 +146,4 @@ assert.ok(spawned.options.env.PATH.startsWith('D:\\gst\\bin;'), 'the install dir
 assert.ok(spawned.options.env.PATH.includes('C:\\windows'), 'and the rest of PATH must survive')
 assert.equal(spawned.options.windowsHide, true, 'no console window may flash over a live broadcast')
 
-console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline shared across viewers, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback.')
+console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback.')

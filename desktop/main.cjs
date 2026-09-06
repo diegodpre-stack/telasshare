@@ -15,56 +15,14 @@ if (localAppUrl) {
 const APP_URL = localAppUrl || 'https://telasshare.onrender.com'
 
 // Apply one list per switch: appendSwitch replaces a previous value for the same switch.
-const {
-  mediaFeaturePolicy, createMediaRuntimeLog,
-  readZeroCopyState, recordZeroCopyFailure, clearZeroCopyFailures,
-} = require('./mediaRuntime.cjs')
-
-// Zero-copy capture is on by default and falls back on its own when the GPU process dies under it, so
-// the decision has to survive the restart that follows a crash. Switches must be appended before the
-// app is ready, and getPath('userData') is available that early, so the file is read here.
-const zeroCopyStatePath = path.join(app.getPath('userData'), 'media-runtime.json')
-const readPersistedZeroCopyState = () => {
-  try { return readZeroCopyState(fs.readFileSync(zeroCopyStatePath, 'utf8')) }
-  // No file yet on first run, and an unreadable one is a machine with no usable history either way.
-  catch { return readZeroCopyState(null) }
-}
-const writeZeroCopyState = (state) => {
-  if (!state) return
-  try {
-    fs.mkdirSync(path.dirname(zeroCopyStatePath), { recursive: true })
-    fs.writeFileSync(zeroCopyStatePath, JSON.stringify(state))
-  } catch { /* Losing the counter costs one more slow start, never a broken launch. */ }
-}
-
-let zeroCopyState = readPersistedZeroCopyState()
-const mediaPolicy = mediaFeaturePolicy(process.env, zeroCopyState)
+const { mediaFeaturePolicy, createMediaRuntimeLog } = require('./mediaRuntime.cjs')
+const mediaPolicy = mediaFeaturePolicy()
 const mediaRuntime = createMediaRuntimeLog(mediaPolicy)
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default')
 if (mediaPolicy.enabledFeatures.length) app.commandLine.appendSwitch('enable-features', mediaPolicy.enabledFeatures.join(','))
 if (mediaPolicy.disabledFeatures.length) app.commandLine.appendSwitch('disable-features', mediaPolicy.disabledFeatures.join(','))
-
-// Long enough that reaching it means the capture path survived actual use, not just startup. A GPU
-// death before this still counts against zero-copy; one after it starts the count over.
-const ZERO_COPY_PROVEN_MS = 10 * 60_000
-let zeroCopyProvenTimer = null
-if (mediaPolicy.zeroCopyCapture) {
-  zeroCopyProvenTimer = setTimeout(() => {
-    const cleared = clearZeroCopyFailures(zeroCopyState)
-    if (cleared) { zeroCopyState = cleared; writeZeroCopyState(cleared) }
-  }, ZERO_COPY_PROVEN_MS)
-  zeroCopyProvenTimer.unref?.()
-}
-
 app.on('child-process-gone', (_event, details) => {
-  if (details.type !== 'GPU') return
-  mediaRuntime.record('gpu-process-gone', details)
-  const failed = recordZeroCopyFailure(zeroCopyState, details, mediaPolicy)
-  if (!failed) return
-  // The run stopped being evidence that the path works the moment the GPU process died under it.
-  clearTimeout(zeroCopyProvenTimer)
-  zeroCopyState = failed
-  writeZeroCopyState(failed)
+  if (details.type === 'GPU') mediaRuntime.record('gpu-process-gone', details)
 })
 const APP_ORIGIN = new URL(APP_URL).origin
 let mainWindow

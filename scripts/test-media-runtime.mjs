@@ -1,59 +1,23 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { createMediaEventLog, mediaEvents, recordPeerFailure } from '../src/mediaEvents.js'
-const {
-  mediaFeaturePolicy, createMediaRuntimeLog,
-  readZeroCopyState, recordZeroCopyFailure, clearZeroCopyFailures, ZERO_COPY_CRASH_LIMIT,
-} = createRequire(import.meta.url)('../desktop/mediaRuntime.cjs')
+const { mediaFeaturePolicy, createMediaRuntimeLog } = createRequire(import.meta.url)('../desktop/mediaRuntime.cjs')
 
 const defaults = mediaFeaturePolicy({})
-assert.equal(defaults.zeroCopyCapture, true, 'the readback capture path is the one that costs frames')
-assert.equal(defaults.zeroCopyDisabledByCrashes, false)
-assert.equal(defaults.lowResolutionHardware, true, 'the capture path must not disable hardware encoding')
-assert.ok(defaults.enabledFeatures.includes('ZeroCopyDesktopCapture'))
-assert.ok(!defaults.disabledFeatures.includes('ZeroCopyDesktopCapture'))
+assert.equal(defaults.zeroCopyCapture, false)
+assert.equal(defaults.lowResolutionHardware, true, 'disabling experimental capture must not disable hardware encoding')
+assert.ok(defaults.disabledFeatures.includes('ZeroCopyDesktopCapture'))
 assert.ok(defaults.disabledFeatures.includes('ForceSoftwareForRtcLowResolutions'))
 assert.ok(defaults.disabledFeatures.includes('WebRtcHideLocalIpsWithMdns'))
 assert.ok(!defaults.disabledFeatures.some((name) => /encoder|decod/i.test(name)))
-const forced = mediaFeaturePolicy({ ENTRETELAS_GPU_CAPTURE: '1' })
-assert.equal(forced.zeroCopyCapture, true)
-assert.ok(forced.enabledFeatures.includes('ZeroCopyDesktopCapture'))
+const experimental = mediaFeaturePolicy({ ENTRETELAS_GPU_CAPTURE: '1' })
+assert.equal(experimental.zeroCopyCapture, true)
+assert.ok(experimental.enabledFeatures.includes('ZeroCopyDesktopCapture'))
+assert.ok(!experimental.disabledFeatures.includes('ZeroCopyDesktopCapture'))
 const legacy = mediaFeaturePolicy({ ENTRETELAS_GPU_CAPTURE: '0' })
 assert.equal(legacy.lowResolutionHardware, false)
 assert.equal(legacy.zeroCopyCapture, false)
-assert.equal(legacy.zeroCopyDisabledByCrashes, false, 'an explicit opt-out is not a crash fallback')
-assert.ok(legacy.disabledFeatures.includes('ZeroCopyDesktopCapture'))
 assert.ok(!legacy.disabledFeatures.includes('ForceSoftwareForRtcLowResolutions'))
-
-// The fallback: enough GPU deaths under zero-copy and the app returns to the safe path by itself,
-// while an explicit 1 still overrides that history for someone whose driver has since been fixed.
-const belowLimit = mediaFeaturePolicy({}, { zeroCopyCrashes: ZERO_COPY_CRASH_LIMIT - 1 })
-assert.equal(belowLimit.zeroCopyCapture, true, 'one crash can be a fluke')
-const atLimit = mediaFeaturePolicy({}, { zeroCopyCrashes: ZERO_COPY_CRASH_LIMIT })
-assert.equal(atLimit.zeroCopyCapture, false)
-assert.equal(atLimit.zeroCopyDisabledByCrashes, true)
-assert.ok(atLimit.disabledFeatures.includes('ZeroCopyDesktopCapture'))
-assert.equal(atLimit.lowResolutionHardware, true, 'falling back on capture must not touch encoding')
-const retried = mediaFeaturePolicy({ ENTRETELAS_GPU_CAPTURE: '1' }, { zeroCopyCrashes: 99 })
-assert.equal(retried.zeroCopyCapture, true)
-assert.equal(retried.zeroCopyDisabledByCrashes, false)
-
-// Anything that is not a plain non-negative integer is a machine with no usable history.
-assert.equal(readZeroCopyState('{"zeroCopyCrashes":3}').zeroCopyCrashes, 3)
-for (const bad of ['', 'not json', '{"zeroCopyCrashes":-1}', '{"zeroCopyCrashes":1.5}', '{"zeroCopyCrashes":"3"}', 'null', null, undefined]) {
-  assert.equal(readZeroCopyState(bad).zeroCopyCrashes, 0, `unusable state must read as no history: ${JSON.stringify(bad)}`)
-}
-
-const onPolicy = mediaFeaturePolicy({})
-assert.equal(recordZeroCopyFailure({ zeroCopyCrashes: 1 }, { reason: 'crashed' }, onPolicy).zeroCopyCrashes, 2)
-assert.equal(recordZeroCopyFailure({}, { reason: 'oom' }, onPolicy).zeroCopyCrashes, 1)
-assert.equal(recordZeroCopyFailure('corrupt', { reason: 'launch-failed' }, onPolicy).zeroCopyCrashes, 1)
-for (const reason of ['clean-exit', 'killed', 'memory-eviction', 'unknown', undefined]) {
-  assert.equal(recordZeroCopyFailure({ zeroCopyCrashes: 1 }, { reason }, onPolicy), null, `${reason} does not accuse the capture path`)
-}
-assert.equal(recordZeroCopyFailure({ zeroCopyCrashes: 1 }, { reason: 'crashed' }, legacy), null, 'a run without zero-copy cannot blame it')
-assert.equal(clearZeroCopyFailures({ zeroCopyCrashes: 2 }).zeroCopyCrashes, 0)
-assert.equal(clearZeroCopyFailures({ zeroCopyCrashes: 0 }), null, 'nothing to clear means nothing to write')
 
 const runtime = createMediaRuntimeLog(defaults, { electron: '44.1.1', chrome: '152.0.7977.65' })
 runtime.record('gpu-process-gone', { reason: 'crashed', exitCode: -1, pid: 123, name: 'SECRET', path: 'SECRET' })
@@ -80,4 +44,4 @@ recordPeerFailure('set-remote-description', { name: 'RTCError', errorDetail: 'sd
 assert.equal(mediaEvents.read().at(-1).phase, 'set-remote-description')
 assert.equal(mediaEvents.read().at(-1).sdpLineNumber, 4)
 assert.ok(!JSON.stringify(mediaEvents.read()).includes('SECRET'))
-console.log('PASS: independent hardware/capture policy, zero-copy on by default with a self-correcting crash fallback, bounded native/renderer failure logs and private-field exclusion.')
+console.log('PASS: independent hardware/capture policy, explicit experimental opt-in, bounded native/renderer failure logs and private-field exclusion.')

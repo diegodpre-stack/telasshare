@@ -18,6 +18,7 @@ import { buildIceConfiguration, initialIceStage, canPreserveWithoutTurn } from '
 import { applySenderSettings, scaleForTarget } from './senderSettings.js'
 import { preferHardwareVideoCodecs } from './encoderSupport.js'
 import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
+import { createNativeBroadcast, isNativeCaptureAvailable } from './nativeBroadcast.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -300,6 +301,20 @@ export default function App() {
   const [shareAudio, setShareAudio] = useState(true)
   const [audioStatus, setAudioStatus] = useState('idle')
   const [showSelfPreview, setShowSelfPreview] = useState(false)
+  // Opt-in while it is new: the toggle only appears where GStreamer is installed, and off means the app
+  // behaves exactly as it did before any of this existed.
+  const [nativeAvailable, setNativeAvailable] = useState(false)
+  const [nativeWanted, setNativeWanted] = useState(() => localStorage.getItem('entretelas-captura-nativa') === '1')
+  // Whether this broadcast is running natively, which is decided when it starts and cannot change
+  // under it: a viewer connected one way must not be answered the other.
+  const [nativeActive, setNativeActive] = useState(false)
+  const [previewStream, setPreviewStream] = useState(null)
+  const nativeRef = useRef(null)
+  // connectionId -> peerId, so an offer arriving from the pipeline knows whom to be sent to. The
+  // per-viewer PeerConnections that would normally hold this do not exist on the native path.
+  const nativeViewersRef = useRef(new Map())
+  const nativeActiveRef = useRef(false)
+  useEffect(() => { nativeActiveRef.current = nativeActive }, [nativeActive])
   const [showPeople, setShowPeople] = useState(true)
   const socketRef = useRef(null)
   const pcsRef = useRef(new Map())
@@ -344,6 +359,36 @@ export default function App() {
   }, [fps, resolution, readTransmissionSettings])
   const send = useCallback((message) => { if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message)) }, [])
 
+  useEffect(() => { isNativeCaptureAvailable().then(setNativeAvailable).catch(() => setNativeAvailable(false)) }, [])
+  useEffect(() => { localStorage.setItem('entretelas-captura-nativa', nativeWanted ? '1' : '0') }, [nativeWanted])
+
+  // Built once and kept for the session. The pipeline lives in the main process and speaks only to this;
+  // everything it produces is put on the socket here, so the server sees ordinary signalling either way.
+  useEffect(() => {
+    if (!nativeAvailable) return
+    const native = createNativeBroadcast({
+      onOffer: (connectionId, sdp) => {
+        const peerId = nativeViewersRef.current.get(connectionId)
+        if (peerId) send({ type: 'signal', to: peerId, connectionId, mode: 'auto', description: { type: 'offer', sdp } })
+      },
+      onCandidate: (connectionId, candidate) => {
+        const peerId = nativeViewersRef.current.get(connectionId)
+        if (peerId) send({ type: 'signal', to: peerId, connectionId, candidate })
+      },
+      onViewerGone: (connectionId) => {
+        const peerId = nativeViewersRef.current.get(connectionId)
+        nativeViewersRef.current.delete(connectionId)
+        if (peerId) send({ type: 'stop', to: peerId, connectionId })
+        setViewers((current) => { const next = { ...current }; delete next[connectionId]; return next })
+      },
+      onError: (_connectionId, reason) => setNotice(reason === 'gstreamer-missing'
+        ? 'A captura nativa não está disponível nesta máquina. Desligue a opção para transmitir pelo navegador.'
+        : 'Um espectador não pôde ser conectado pela captura nativa.'),
+    })
+    nativeRef.current = native
+    return () => { native.dispose(); nativeRef.current = null }
+  }, [nativeAvailable, send])
+
   // One sweep across every peer we are transmitting to, only while the preview panel that shows the
   // result is open. Closing it stops the sampling; the numbers resume from the next sweep.
   useEffect(() => {
@@ -364,6 +409,15 @@ export default function App() {
   }, [showSelfPreview])
 
   const closeConnection = useCallback((connectionId, notify = false) => {
+    // Native viewers have no entry in pcsRef: their connection lives in the pipeline, not in this page.
+    const nativePeer = nativeViewersRef.current.get(connectionId)
+    if (nativePeer !== undefined) {
+      nativeViewersRef.current.delete(connectionId)
+      if (notify) send({ type: 'stop', to: nativePeer, connectionId })
+      nativeRef.current?.removeViewer(connectionId)
+      setViewers((current) => { const next = { ...current }; delete next[connectionId]; return next })
+      return
+    }
     const entry = pcsRef.current.get(connectionId)
     if (!entry) { setRemoteScreens((current) => { const next = { ...current }; delete next[connectionId]; return next }); return }
     if (notify) send({ type: 'stop', to: entry.peerId, connectionId })
@@ -374,6 +428,17 @@ export default function App() {
   }, [send])
 
   const stopSharing = useCallback((notify = true) => {
+    // The pipelines hold the capture and the GPU encoder, so they go first and unconditionally.
+    if (nativeActiveRef.current) {
+      mediaEvents.record('broadcast-stopped')
+      for (const [connectionId, peerId] of nativeViewersRef.current) {
+        if (notify) send({ type: 'stop', to: peerId, connectionId })
+      }
+      nativeViewersRef.current.clear()
+      nativeRef.current?.stop()
+      nativeActiveRef.current = false
+      setNativeActive(false); setPreviewStream(null)
+    }
     if (localStreamRef.current) mediaEvents.record('broadcast-stopped')
     for (const [id, entry] of pcsRef.current) if (entry.role === 'transmitter') closeConnection(id, notify)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
@@ -387,6 +452,12 @@ export default function App() {
     if (localStreamRef.current) mediaEvents.record('capture-closed-with-room')
     earlyCandidatesRef.current.clear()
     for (const id of [...pcsRef.current.keys()]) closeConnection(id, false)
+    // Leaving the room must take the pipelines with it. They are separate processes holding the capture
+    // and the GPU encoder, and nothing else would ever come back for them.
+    nativeViewersRef.current.clear()
+    nativeRef.current?.stop()
+    nativeActiveRef.current = false
+    setNativeActive(false); setPreviewStream(null)
     localStreamRef.current?.getTracks().forEach((track) => track.stop()); localStreamRef.current = null
     setAudioStatus('idle')
     setBroadcasting(false)
@@ -563,6 +634,14 @@ export default function App() {
   collectRouteStatsRef.current = collectRouteStats
 
   const handleSignal = useCallback(async (message) => {
+    // A connection the pipeline owns: there is no local RTCPeerConnection to drive, only an answer to
+    // hand back. WHIP offers no channel for the viewer's trickled candidates, so those are dropped --
+    // the offer already carries the pipeline's own, and the checks the viewer sends against them arrive
+    // as peer-reflexive candidates, which is what actually forms the pair.
+    if (nativeViewersRef.current.has(message.connectionId)) {
+      if (message.description?.type === 'answer') await nativeRef.current?.answer(message.connectionId, message.description.sdp)
+      return
+    }
     let entry, phase = 'create-receiver'
     try {
       entry = pcsRef.current.get(message.connectionId)
@@ -792,6 +871,26 @@ export default function App() {
     return stream
   }
   const startBroadcast = async () => {
+    // Native first when it is switched on, and the ordinary path when it will not start. Someone who
+    // ticked a box must never be left unable to broadcast because of it.
+    if (nativeWanted && nativeAvailable && nativeRef.current) {
+      const started = await nativeRef.current.start({
+        monitorIndex: 0,
+        fps,
+        bitrateKbps: Math.round(MAX_BITRATE_PER_VIEWER / 1000 / 2),
+      }).catch(() => false)
+      if (started) {
+        nativeViewersRef.current.clear()
+        // Set before the state, not with it: a watch-request can arrive in the same tick, and a
+        // render behind would send that viewer down the Chromium path with no capture behind it.
+        nativeActiveRef.current = true
+        setNativeActive(true); setAudioStatus('off'); setBroadcasting(true); send({ type: 'broadcast-start' })
+        mediaEvents.record('native-broadcast-started', { fps })
+        setNotice('Transmitindo com captura nativa. O áudio ainda não passa por este caminho.')
+        return
+      }
+      setNotice('A captura nativa não iniciou. Usando a captura do navegador para esta transmissão.')
+    }
     try {
       const stream = await getCapture(); send({ type: 'broadcast-start' }); setBroadcasting(true)
       setNotice(!shareAudio ? 'Sua transmissão está disponível para todos na sala (sem áudio).'
@@ -803,6 +902,20 @@ export default function App() {
   const shareWith = async (peerId, mode = 'auto') => {
     let entry, phase = 'create-sender'
     const connectionId = crypto.randomUUID()
+    // On the native path the pipeline is the sender: it produces the offer, which arrives asynchronously
+    // and is put on the socket from the effect above. No RTCPeerConnection is created here at all.
+    if (nativeActiveRef.current) {
+      nativeViewersRef.current.set(connectionId, peerId)
+      const added = await nativeRef.current?.addViewer(connectionId)
+      if (!added) {
+        nativeViewersRef.current.delete(connectionId)
+        setNotice('Não foi possível abrir a captura nativa para este espectador.')
+        return
+      }
+      setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } }))
+      setNotice('Novo espectador conectado à sua transmissão.')
+      return
+    }
     try {
       const stream = localStreamRef.current; if (!stream) return
       entry = createPeer(connectionId, peerId, 'transmitter', mode); const videoTrack = stream.getVideoTracks()[0]
@@ -852,6 +965,22 @@ export default function App() {
   const peers = useMemo(() => users.filter((user) => user.id !== selfId), [users, selfId])
   const userName = (id) => users.find((user) => user.id === id)?.name || 'amigo'
   const remoteEntries = Object.entries(remoteScreens)
+  // Native broadcasts have no local stream to test, so the flag the UI reads has to cover both paths.
+  const isBroadcasting = nativeActive || Boolean(localStreamRef.current)
+  // The preview is a whole extra pipeline on the native path, so it is opened on demand and released on
+  // close rather than kept running behind a panel nobody has open.
+  const openSelfPreview = async () => {
+    setShowSelfPreview(true)
+    if (!nativeActive) return
+    const opened = await nativeRef.current?.openPreview(setPreviewStream)
+    if (!opened) { setShowSelfPreview(false); setNotice('A prévia da captura nativa não pôde ser aberta.') }
+  }
+  const closeSelfPreview = () => {
+    setShowSelfPreview(false)
+    if (!nativeActive) return
+    nativeRef.current?.closePreview()
+    setPreviewStream(null)
+  }
   const viewerNames = [...new Set(Object.values(viewers).map((viewer) => userName(viewer.peerId)))]
   const viewerRoutes = [...new Set(Object.values(viewers).map((viewer) => viewer.route).filter((route) => route && route !== 'connecting'))]
   const routeBaseLabel = !viewerNames.length ? 'sem espectadores' : viewerRoutes.length === 0 ? 'detectando conexão' : viewerRoutes.length > 1 ? 'conexão mista: P2P + TURN' : viewerRoutes[0] === 'turn' ? 'servidor auxiliar (TURN)' : 'conexão direta P2P'
@@ -867,12 +996,13 @@ export default function App() {
   return <main className="shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>EntreTelas</strong><span>Sala · {roomName}</span></div></div><div className="header-actions"><div className={`connection ${connection}`}><span className="pulse" />{connection === 'online' ? <Wifi size={15} /> : <WifiOff size={15} />}{connection === 'online' ? 'Conectado' : connection === 'connecting' ? 'Conectando' : 'Offline'}</div><button className="leave-room" onClick={leaveRoom}><LogOut size={15} />Sair da sala</button></div></header>
     {diagnosticsEnabled && <MediaDiagnostics peers={pcsRef} localStream={localStreamRef} />}
     <BuildStamp />
-    {showSelfPreview && localStreamRef.current && <SelfPreview stream={localStreamRef.current} routeLabel={routeLabel} outboundFpsLabel={outboundFpsLabel} onClose={() => setShowSelfPreview(false)} />}
-    {!localStreamRef.current && <button className="start-broadcast standalone" onClick={startBroadcast}><Radio size={18} />Iniciar transmissão</button>}
-    {localStreamRef.current && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {resolutions[resolution].label} · preferência {fps} FPS · {audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={() => setShowSelfPreview(true)}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
+    {showSelfPreview && (nativeActive ? previewStream : localStreamRef.current) && <SelfPreview stream={nativeActive ? previewStream : localStreamRef.current} routeLabel={routeLabel} outboundFpsLabel={outboundFpsLabel} onClose={closeSelfPreview} />}
+    {!isBroadcasting && <button className="start-broadcast standalone" onClick={startBroadcast}><Radio size={18} />Iniciar transmissão</button>}
+    {isBroadcasting && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {nativeActive ? 'captura nativa' : resolutions[resolution].label} · preferência {fps} FPS · {nativeActive ? 'sem áudio (ainda não passa pela captura nativa)' : audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={openSelfPreview}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
     <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>
+    {nativeAvailable && <label className="size-control">Captura da sua tela<select value={nativeWanted ? 'nativa' : 'navegador'} onChange={(event) => setNativeWanted(event.target.value === 'nativa')} disabled={isBroadcasting}><option value="navegador">Navegador (padrão)</option><option value="nativa">Nativa — experimental</option></select><span>{isBroadcasting ? 'Não muda uma transmissão já iniciada.' : 'A nativa mantém o quadro na placa de vídeo e sustenta 60 FPS em 1440p, mas ainda não envia áudio.'}</span></label>}
     <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><label className="quality-toggle" htmlFor="quality-toggle"><SlidersHorizontal size={16} /><span>Configurar transmissão</span></label></div>
     <div className={`workspace multi-workspace${showPeople ? '' : ' people-hidden'}`}>
       {showPeople && <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{peers.length + 1}</span></div><div className="people-list">{peers.length === 0 ? <div className="empty"><Users size={28} /><strong>Ninguém por aqui ainda</strong><span>Compartilhe o nome e a senha desta sala com seus amigos.</span></div> : peers.map((user) => <article className="person" key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions"><button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>{isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>}

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fase 1 — espectador</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #06101c; color: #dbe8f2; font: 14px/1.5 system-ui, sans-serif; }
+  header { padding: 12px 16px; border-bottom: 1px solid #23394d; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  h1 { font-size: 15px; margin: 0; font-weight: 700; }
+  #state { color: #8296a8; }
+  #state.live { color: #41ca9f; }
+  #state.error { color: #ff6871; }
+  video { display: block; width: 100%; background: #02060a; }
+  dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; margin: 0; background: #23394d; border-top: 1px solid #23394d; }
+  div.cell { background: #0c1c2b; padding: 10px 14px; }
+  dt { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #8296a8; }
+  dd { margin: 4px 0 0; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  dd small { font-size: 12px; font-weight: 400; color: #8296a8; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fase 1 · prova de rede</h1>
+  <span id="state">aguardando o pipeline…</span>
+</header>
+<video id="video" autoplay playsinline muted></video>
+<dl>
+  <div class="cell"><dt>Resolução</dt><dd id="size">—</dd></div>
+  <div class="cell"><dt>FPS recebido</dt><dd id="fps">—</dd></div>
+  <div class="cell"><dt>Decoder</dt><dd id="decoder" style="font-size:13px">—</dd></div>
+  <div class="cell"><dt>Bitrate</dt><dd id="bitrate">—</dd></div>
+  <div class="cell"><dt>Quadros perdidos</dt><dd id="dropped">—</dd></div>
+</dl>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const setState = (text, cls = '') => { $('state').textContent = text; $('state').className = cls; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitForOffer() {
+  for (;;) {
+    try {
+      const { offer } = await (await fetch('/api/offer', { cache: 'no-store' })).json();
+      if (offer) return offer;
+    } catch { /* the relay may still be starting */ }
+    await sleep(500);
+  }
+}
+
+// The answer travels back inside the pipeline's own POST, and WHIP gives us no channel to trickle our
+// candidates afterwards -- so gather everything before answering rather than answering early.
+function gathered(pc) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', done); resolve(); } };
+    pc.addEventListener('icegatheringstatechange', done);
+    setTimeout(resolve, 3000);
+  });
+}
+
+async function pumpCandidates(pc) {
+  let applied = 0;
+  for (;;) {
+    try {
+      const { candidates } = await (await fetch(`/api/candidates?from=${applied}`, { cache: 'no-store' })).json();
+      for (const candidate of candidates || []) {
+        try { await pc.addIceCandidate(candidate); } catch { /* a late or duplicate candidate is harmless */ }
+        applied += 1;
+      }
+    } catch { /* keep polling */ }
+    if (['connected', 'completed', 'failed', 'closed'].includes(pc.iceConnectionState)) return;
+    await sleep(700);
+  }
+}
+
+function reportStats(pc) {
+  let lastBytes = null, lastAt = null;
+  setInterval(async () => {
+    const stats = await pc.getStats();
+    // Also sent back to the relay so the run can be judged from the server side. Reading the verdict
+    // out of a browser needs a browser you can inspect, and the one that matters here is the user's.
+    const wire = { ice: pc.iceConnectionState, at: new Date().toISOString() };
+    stats.forEach((r) => {
+      if (r.type === 'inbound-rtp' && r.kind === 'video') {
+        Object.assign(wire, {
+          width: r.frameWidth, height: r.frameHeight, fps: r.framesPerSecond,
+          decoder: r.decoderImplementation, decoded: r.framesDecoded, dropped: r.framesDropped,
+          bytes: r.bytesReceived,
+        });
+      }
+      if (r.type === 'candidate-pair' && r.nominated) wire.rttMs = Math.round((r.currentRoundTripTime || 0) * 1000);
+      if (r.type === 'remote-candidate' && wire.remote === undefined) wire.remote = r.candidateType;
+      if (r.type === 'local-candidate' && wire.local === undefined) wire.local = r.candidateType;
+    });
+    fetch('/api/stats', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(wire) }).catch(() => {});
+    stats.forEach((r) => {
+      if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
+      if (r.frameWidth) $('size').textContent = `${r.frameWidth}×${r.frameHeight}`;
+      if (Number.isFinite(r.framesPerSecond)) $('fps').textContent = Math.round(r.framesPerSecond);
+      $('decoder').textContent = r.decoderImplementation || '—';
+      $('dropped').innerHTML = `${r.framesDropped ?? 0} <small>de ${r.framesDecoded ?? 0}</small>`;
+      if (Number.isFinite(r.bytesReceived) && lastAt !== null && r.timestamp > lastAt) {
+        const mbps = (r.bytesReceived - lastBytes) * 8 / (r.timestamp - lastAt) / 1000;
+        $('bitrate').innerHTML = `${mbps.toFixed(1)} <small>Mbps</small>`;
+      }
+      lastBytes = r.bytesReceived; lastAt = r.timestamp;
+    });
+  }, 1000);
+}
+
+(async () => {
+  const offer = await waitForOffer();
+  setState('oferta recebida, respondendo…');
+  // No addTransceiver here on purpose: setRemoteDescription creates one per m-line in the offer, and
+  // adding our own first produces an extra, unmatched m-line that the sender rejects.
+  // Chrome hides local addresses behind mDNS `.local` candidates, and GStreamer's ICE agent cannot
+  // resolve those -- with host candidates alone the two never find a pair. A STUN server gives the
+  // browser a server-reflexive candidate carrying a real address, which GStreamer can reach. The app
+  // already configures STUN in production, so this matches how it will actually run.
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  // Exposed so the connection can be inspected from the console while this spike is being debugged.
+  window.pc = pc;
+  window.localCandidates = [];
+  pc.onicecandidate = ({ candidate }) => { if (candidate) window.localCandidates.push(candidate.candidate); };
+  pc.ontrack = ({ streams, track }) => { $('video').srcObject = streams[0] || new MediaStream([track]); };
+  pc.oniceconnectionstatechange = () => {
+    const s = pc.iceConnectionState;
+    if (s === 'connected' || s === 'completed') setState('transmitindo', 'live');
+    else if (s === 'failed') setState('falha de conexão ICE', 'error');
+    else setState(s);
+  };
+
+  await pc.setRemoteDescription({ type: 'offer', sdp: offer });
+  await pc.setLocalDescription(await pc.createAnswer());
+  await gathered(pc);
+
+  const res = await fetch('/api/answer', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sdp: pc.localDescription.sdp }),
+  });
+  if (!res.ok) { setState('o relay recusou a resposta', 'error'); return; }
+
+  setState('conectando…');
+  pumpCandidates(pc);
+  reportStats(pc);
+})().catch((error) => setState(`erro: ${error.message}`, 'error'));
+</script>
+</body>
+</html>

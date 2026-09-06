@@ -73,7 +73,8 @@ function createWhipBridge({ onOffer, onCandidate, onClosed, transform = (sdp) =>
         onOffer?.(id, offer)
         const answer = await new Promise((resolve) => {
           session.deliver = resolve
-          session.timer = setTimeout(() => resolve(null), timeoutMs)
+          // An unarmed seat waits with no clock at all; arm() starts one when a viewer takes it.
+          if (session.armed) session.timer = setTimeout(() => resolve(null), timeoutMs)
         })
         clearTimeout(session.timer)
         session.deliver = null
@@ -115,11 +116,25 @@ function createWhipBridge({ onOffer, onCandidate, onClosed, transform = (sdp) =>
     }),
     get port() { return port },
     // Called before the pipeline starts, so the endpoint can be handed to it on the command line.
-    createSession() {
+    //
+    // A seat in a shared pipeline offers as soon as the pipeline runs, long before anyone sits in it, and
+    // must wait indefinitely rather than time out on a viewer who has not arrived yet. `armed: false`
+    // says so; arm() starts the clock once a viewer is actually expected to answer.
+    createSession({ armed = true } = {}) {
       if (port === null) throw new Error('bridge is not listening')
       const id = randomUUID()
-      sessions.set(id, { deliver: null, timer: null })
+      sessions.set(id, { deliver: null, timer: null, armed })
       return { id, endpoint: `http://127.0.0.1:${port}/whip/${id}` }
+    },
+
+    // A viewer has been given this seat: from here an answer is owed, and not getting one is a failure
+    // rather than an empty chair.
+    arm(id) {
+      const session = sessions.get(id)
+      if (!session || session.armed) return false
+      session.armed = true
+      if (session.deliver && !session.timer) session.timer = setTimeout(() => session.deliver?.(null), timeoutMs)
+      return true
     },
     // The viewer's answer, arriving from the signalling socket. False means nobody was waiting for it --
     // a duplicate, or one that came back after the pipeline gave up.

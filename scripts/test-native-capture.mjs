@@ -110,6 +110,27 @@ assert.equal(supportsProcessLoopback('D:\gst\bin', answer('loopback-target-pid :
 assert.equal(supportsProcessLoopback('D:\gst\bin', answer('')), true, 'the answer is cached, not asked again')
 assert.equal(probes, 1)
 
+// --- reachable candidates -------------------------------------------------
+// Host candidates alone are private addresses: fine on loopback, unreachable from anywhere else, so a
+// viewer over the internet waits at "connecting" until it gives up.
+const noIce = buildPipelineArgs({ endpoint: 'http://x/whip' }).join(' ')
+assert.ok(!noIce.includes('stun-server') && !noIce.includes('turn-server'))
+
+const withIce = buildPipelineArgs({
+  endpoint: 'http://x/whip',
+  stunServer: 'stun://stun.example:3478',
+  turnServer: 'turn://user:pass@relay.example:3478',
+}).join(' ')
+assert.ok(withIce.includes('stun-server=stun://stun.example:3478'))
+assert.ok(withIce.includes('turn-server=turn://user:pass@relay.example:3478'))
+
+// A malformed value would make gst-launch refuse the pipeline, taking the whole broadcast with it, so
+// anything not in URL form is left out rather than passed along.
+for (const bad of ['stun.example:3478', 'stun:stun.example:3478', '', null, 42, 'http://x']) {
+  const args = buildPipelineArgs({ endpoint: 'http://x/whip', stunServer: bad, turnServer: bad }).join(' ')
+  assert.ok(!args.includes('stun-server') && !args.includes('turn-server'), `${bad} must not reach the command line`)
+}
+
 // --- spawning -------------------------------------------------------------
 let spawned = null
 const fakeSpawn = (command, spawnArgs, options) => { spawned = { command, spawnArgs, options }; return { pid: 1 } }
@@ -125,4 +146,4 @@ assert.ok(spawned.options.env.PATH.startsWith('D:\\gst\\bin;'), 'the install dir
 assert.ok(spawned.options.env.PATH.includes('C:\\windows'), 'and the rest of PATH must survive')
 assert.equal(spawned.options.windowsHide, true, 'no console window may flash over a live broadcast')
 
-console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, system sound with the app excluded, sane defaults and missing-install fallback.')
+console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback.')

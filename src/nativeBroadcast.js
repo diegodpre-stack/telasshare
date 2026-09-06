@@ -15,6 +15,32 @@ export const PREVIEW_ID = 'native-preview'
 
 const bridge = () => (typeof window === 'undefined' ? null : window.electronAPI)
 
+// The pipeline gathers only host candidates unless it is told where to ask for more, and host candidates
+// are private addresses no one outside the network can reach. On loopback that is invisible -- both ends
+// are the same machine -- and over the internet it is fatal: the viewer sits at "connecting" until it
+// gives up, because nothing it was offered is reachable.
+//
+// whipsink wants one STUN and one TURN as URLs rather than the object list the browser takes, so the
+// app's own ICE configuration is translated here instead of being configured twice and drifting apart.
+const asUrl = (value) => (Array.isArray(value) ? value : [value]).filter((url) => typeof url === 'string')
+
+export function nativeIceServers(servers = []) {
+  const entries = servers.flatMap((server) => asUrl(server?.urls).map((url) => ({ url, server })))
+  const stun = entries.find(({ url }) => /^stuns?:/i.test(url))
+  // UDP relay first: TCP and TLS exist for networks that block it and cost latency everywhere else.
+  const turns = entries.filter(({ url, server }) => /^turns?:/i.test(url) && server?.username && server?.credential)
+  const turn = turns.find(({ url }) => /transport=udp/i.test(url)) || turns.find(({ url }) => !/transport=/i.test(url)) || turns[0]
+  return {
+    stunServer: stun ? stun.url.replace(/^(stuns?):(?:\/\/)?/i, '$1://').split(/[?]/)[0] : null,
+    // Credentials are percent-encoded because Cloudflare's contain characters that would otherwise end
+    // the authority early and produce a URL pointing somewhere else entirely.
+    turnServer: turn
+      ? turn.url.replace(/^(turns?):(?:\/\/)?/i, (_match, scheme) =>
+        `${scheme}://${encodeURIComponent(turn.server.username)}:${encodeURIComponent(turn.server.credential)}@`).split(/[?]/)[0]
+      : null,
+  }
+}
+
 export async function isNativeCaptureAvailable() {
   try { return (await bridge()?.isNativeCaptureAvailable?.()) === true } catch { return false }
 }

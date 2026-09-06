@@ -90,13 +90,20 @@ const audioArgs = ({ excludePid, allowProcessLoopback }) => {
 function buildPipelineArgs({
   endpoint, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true,
   audio = false, excludePid = null, allowProcessLoopback = false,
+  stunServer = null, turnServer = null,
 } = {}) {
   if (!endpoint) throw new Error('endpoint is required')
   return [
     '-e',
     // Named first so both branches can link into it. Sound and picture are separate sources at separate
     // rates, so each ends in its own queue: sharing one thread lets the slower branch stall the faster.
+    //
+    // Without a STUN server this gathers host candidates only -- private addresses that work on loopback
+    // and are unreachable from anywhere else, so a viewer over the internet waits at "connecting" until
+    // it gives up. TURN carries the networks where even that is not enough.
     'whipsink', 'name=ws', `whip-endpoint=${endpoint}`,
+    ...(typeof stunServer === 'string' && /^stuns?:\/\//i.test(stunServer) ? [`stun-server=${stunServer}`] : []),
+    ...(typeof turnServer === 'string' && /^turns?:\/\//i.test(turnServer) ? [`turn-server=${turnServer}`] : []),
     'd3d11screencapturesrc',
     ...sourceArgs({ windowHandle, monitorIndex }),
     `show-cursor=${showCursor ? 'true' : 'false'}`,

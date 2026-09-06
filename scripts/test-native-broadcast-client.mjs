@@ -39,7 +39,30 @@ globalThis.window = { electronAPI: api }
 globalThis.RTCPeerConnection = FakePeer
 globalThis.MediaStream = class { constructor(tracks = []) { this.tracks = tracks } }
 
-const { createNativeBroadcast, PREVIEW_ID, isNativeCaptureAvailable } = await import('../src/nativeBroadcast.js')
+const { createNativeBroadcast, PREVIEW_ID, isNativeCaptureAvailable, nativeIceServers } = await import('../src/nativeBroadcast.js')
+
+// --- ICE servers for the pipeline ----------------------------------------
+// Without these it gathers host candidates only: private addresses that work on loopback and are
+// unreachable from anywhere else, so a viewer over the internet waits at "connecting" and never joins.
+const cloudflare = [
+  { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] },
+  { urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:3478?transport=tcp'], username: 'a/b+c', credential: 'p@ss=word' },
+]
+const ice = nativeIceServers(cloudflare)
+assert.equal(ice.stunServer, 'stun://stun.cloudflare.com:3478', 'whipsink wants a URL, not the browser form')
+// UDP first: TCP and TLS exist for networks that block it and cost latency everywhere else.
+assert.ok(ice.turnServer.startsWith('turn://') && ice.turnServer.endsWith('@turn.cloudflare.com:3478'))
+// Credentials must be encoded, or a slash or an at-sign ends the authority early and the URL points
+// somewhere else entirely -- which fails as a silent connection problem, not as an error.
+assert.ok(ice.turnServer.includes(encodeURIComponent('a/b+c')) && ice.turnServer.includes(encodeURIComponent('p@ss=word')))
+assert.ok(!ice.turnServer.includes('?transport='), 'the query is not part of the authority')
+
+// TURN without credentials cannot be used and must not be half-passed.
+assert.equal(nativeIceServers([{ urls: 'turn:relay:3478' }]).turnServer, null)
+assert.deepEqual(nativeIceServers([]), { stunServer: null, turnServer: null })
+assert.deepEqual(nativeIceServers(), { stunServer: null, turnServer: null })
+assert.equal(nativeIceServers([{ urls: 'stun://already:3478' }]).stunServer, 'stun://already:3478', 'a URL already in form is left alone')
+assert.equal(nativeIceServers([{ urls: [null, 42, 'stun:ok:1'] }]).stunServer, 'stun://ok:1', 'junk in the list must not become an argument')
 
 assert.equal(await isNativeCaptureAvailable(), true)
 
@@ -108,4 +131,4 @@ assert.ok(calls.some(([kind]) => kind === 'stop'))
 native.dispose()
 assert.equal(handlers.offer, null, 'listeners must be released, or a second broadcast gets two of each')
 
-console.log('PASS: viewer signalling forwarded, preview answered locally, preview pipeline released on close, listeners disposed.')
+console.log('PASS: ICE servers translated for the pipeline, viewer signalling forwarded, preview answered locally, preview pipeline released on close, listeners disposed.')

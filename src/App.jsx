@@ -18,7 +18,7 @@ import { buildIceConfiguration, initialIceStage, canPreserveWithoutTurn } from '
 import { applySenderSettings, scaleForTarget } from './senderSettings.js'
 import { preferHardwareVideoCodecs } from './encoderSupport.js'
 import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
-import { createNativeBroadcast, isNativeCaptureAvailable } from './nativeBroadcast.js'
+import { createNativeBroadcast, isNativeCaptureAvailable, nativeIceServers } from './nativeBroadcast.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -893,6 +893,9 @@ export default function App() {
         monitorIndex: source.monitorIndex ?? 0,
         windowHandle: source.windowHandle ?? null,
         audio: shareAudio,
+        // The pipeline has its own ICE agent and knows nothing of what the app negotiated, so the same
+        // servers the browser path uses have to be handed to it explicitly.
+        ...nativeIceServers(iceServersRef.current),
         fps,
         bitrateKbps: Math.round(MAX_BITRATE_PER_VIEWER / 1000 / 2),
       }).catch(() => false)

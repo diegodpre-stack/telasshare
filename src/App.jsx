@@ -202,7 +202,7 @@ function RemoteScreen({ screen, name, size, onStop }) {
   }, [play, screen.stream])
   const enableAudio = () => { const video = videoRef.current; if (!video) return; video.muted = false; setMuted(false); play() }
   const goFullscreen = () => { const frame = videoRef.current?.parentElement; return frame?.requestFullscreen?.() || videoRef.current?.webkitEnterFullscreen?.() }
-  const connectionDetails = [screen.route === 'turn' ? 'TURN' : screen.route === 'p2p' ? 'P2P' : '', screen.protocol, Number.isFinite(screen.rttMs) ? `${screen.rttMs} ms` : '', Number.isFinite(screen.receivedMbps) ? `${screen.receivedMbps} Mbps` : '', Number.isFinite(screen.packetLoss) ? `${screen.packetLoss}% perda` : ''].filter(Boolean).join(' · ')
+  const connectionDetails = [screen.route === 'turn' ? 'TURN' : screen.route === 'p2p' ? 'P2P' : '', screen.route === 'turn' ? screen.relayProtocol || screen.protocol : screen.protocol, Number.isFinite(screen.rttMs) ? `${screen.rttMs} ms` : '', Number.isFinite(screen.receivedMbps) ? `${screen.receivedMbps} Mbps` : '', Number.isFinite(screen.packetLoss) ? `${screen.packetLoss}% perda` : ''].filter(Boolean).join(' · ')
   return <article className={`screen-card size-${size}`}>
     {screen.error && <p role="alert" className="hint">{screen.error}</p>}
     <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{Number.isFinite(screen.fps) ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}{connectionDetails ? ` · ${connectionDetails}` : ''}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
@@ -463,7 +463,7 @@ export default function App() {
         failConnection()
       }
     }
-    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, mode === 'auto' ? 3_000 : 7_000)
+    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, mode === 'p2p' ? 7_000 : 4_000)
     return entry
   }, [closeConnection, send])
 
@@ -487,8 +487,9 @@ export default function App() {
         const local = pair ? stats.get(pair.localCandidateId) : null; const remote = pair ? stats.get(pair.remoteCandidateId) : null
         const route = pair ? local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'turn' : 'p2p' : null
         const protocol = String(local?.protocol || remote?.protocol || '').toUpperCase()
+        const relayProtocol = String(local?.relayProtocol || '').toUpperCase()
         const rttMs = Number.isFinite(pair?.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : null
-        setRemoteScreens((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], ...(Number.isFinite(measured) ? { fps: Math.round(measured) } : {}), route, protocol, rttMs, receivedMbps, packetLoss } } : current)
+        setRemoteScreens((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], ...(Number.isFinite(measured) ? { fps: Math.round(measured) } : {}), route, protocol, relayProtocol, rttMs, receivedMbps, packetLoss } } : current)
         // Static content can produce no frames; ICE state handles actual connectivity failures.
       } catch { /* optional browser statistics */ }
     }, 1000)
@@ -525,9 +526,10 @@ export default function App() {
         const local = stats.get(pair.localCandidateId); const remote = stats.get(pair.remoteCandidateId)
         const route = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'turn' : 'p2p'
         const protocol = String(local?.protocol || remote?.protocol || '').toUpperCase()
+        const relayProtocol = String(local?.relayProtocol || '').toUpperCase()
         const rttMs = Number.isFinite(pair.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : null
         const availableMbps = Number.isFinite(pair.availableOutgoingBitrate) ? Math.round(pair.availableOutgoingBitrate / 100_000) / 10 : null
-        setViewers((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], route, protocol, rttMs, availableMbps, sentMbps, limitation, ...(Number.isFinite(outboundFps) ? { fps: outboundFps } : {}) } } : current)
+        setViewers((current) => current[connectionId] ? { ...current, [connectionId]: { ...current[connectionId], route, protocol, relayProtocol, rttMs, availableMbps, sentMbps, limitation, ...(Number.isFinite(outboundFps) ? { fps: outboundFps } : {}) } } : current)
       } catch { /* route statistics are optional on older browsers */ }
     }
     return inspect
@@ -825,7 +827,7 @@ export default function App() {
   const viewerNames = [...new Set(Object.values(viewers).map((viewer) => userName(viewer.peerId)))]
   const viewerRoutes = [...new Set(Object.values(viewers).map((viewer) => viewer.route).filter((route) => route && route !== 'connecting'))]
   const routeBaseLabel = !viewerNames.length ? 'sem espectadores' : viewerRoutes.length === 0 ? 'detectando conexão' : viewerRoutes.length > 1 ? 'conexão mista: P2P + TURN' : viewerRoutes[0] === 'turn' ? 'servidor auxiliar (TURN)' : 'conexão direta P2P'
-  const routeDetails = Object.values(viewers).map((viewer) => `${userName(viewer.peerId)}: ${[viewer.route === 'turn' ? 'TURN' : viewer.route === 'p2p' ? 'P2P' : '', viewer.protocol, Number.isFinite(viewer.fps) ? `${viewer.fps} FPS` : '', Number.isFinite(viewer.sentMbps) ? `${viewer.sentMbps} Mbps enviados` : '', Number.isFinite(viewer.rttMs) ? `${viewer.rttMs} ms` : '', Number.isFinite(viewer.availableMbps) ? `${viewer.availableMbps} Mbps disponíveis` : '', viewer.limitation ? `limite: ${viewer.limitation}` : ''].filter(Boolean).join(' · ')}`)
+  const routeDetails = Object.values(viewers).map((viewer) => `${userName(viewer.peerId)}: ${[viewer.route === 'turn' ? 'TURN' : viewer.route === 'p2p' ? 'P2P' : '', viewer.route === 'turn' ? viewer.relayProtocol || viewer.protocol : viewer.protocol, Number.isFinite(viewer.fps) ? `${viewer.fps} FPS` : '', Number.isFinite(viewer.sentMbps) ? `${viewer.sentMbps} Mbps enviados` : '', Number.isFinite(viewer.rttMs) ? `${viewer.rttMs} ms` : '', Number.isFinite(viewer.availableMbps) ? `${viewer.availableMbps} Mbps disponíveis` : '', viewer.limitation ? `limite: ${viewer.limitation}` : ''].filter(Boolean).join(' · ')}`)
   const routeLabel = `${routeBaseLabel}${routeDetails.length ? ` · ${routeDetails.join(' / ')}` : ''}`
   const outboundFpsValues = Object.values(viewers).map((viewer) => viewer.fps).filter(Number.isFinite)
   const outboundFpsLabel = outboundFpsValues.length ? Math.min(...outboundFpsValues) === Math.max(...outboundFpsValues) ? `~${outboundFpsValues[0]} FPS enviados` : `~${Math.min(...outboundFpsValues)}–${Math.max(...outboundFpsValues)} FPS enviados` : ''

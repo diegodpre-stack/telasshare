@@ -9,10 +9,11 @@ assert.equal(servers[0].urls.length, 4)
 for (const mode of ['auto', 'turn', 'p2p']) {
   const config = buildIceConfiguration(servers, initialIceStage(mode), mode === 'turn')
   assert.equal(config.iceTransportPolicy, mode === 'turn' ? 'relay' : 'all')
-  assert.equal(config.iceServers[0].urls.length, mode === 'turn' ? 2 : 1)
+  assert.equal(config.iceServers[0].urls.length, mode === 'p2p' ? 1 : 2)
   assert.ok(config.iceServers[0].urls.every(url => !url.includes('tcp')))
 }
 assert.equal(buildIceConfiguration(servers, 'all', false).iceTransportPolicy, 'all')
 assert.equal(selectIceServers([{ urls: 'turns:example.org:443' }], 'udp').length, 0)
 assert.equal(selectIceServers([{ urls: 'turn:example.org:3478' }], 'udp').length, 1)
+assert.deepEqual(selectIceServers([{ urls: ['stun:stun.cloudflare.com:53', 'turn:turn.cloudflare.com:53?transport=udp', 'turn:turn.cloudflare.com:3478?transport=udp'] }], 'udp')[0].urls, ['turn:turn.cloudflare.com:3478?transport=udp'])
 console.log('ICE policy tests passed: direct/UDP/all, no TLS/TCP in UDP stage, credentials preserved.')

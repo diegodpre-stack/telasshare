@@ -1,6 +1,7 @@
 // No candidate pool by default: peers are created immediately before negotiation.
-// Automatic starts with STUN only; adding TURN later must not exclude direct routes.
-export const initialIceStage = (mode) => mode === 'turn' ? 'udp' : 'direct'
+// Automatic gathers direct and TURN/UDP candidates together. ICE still prefers a working direct
+// pair, while UDP relay no longer depends on reconfiguring an already-negotiated connection.
+export const initialIceStage = (mode) => mode === 'p2p' ? 'direct' : 'udp'
 
 export async function canPreserveWithoutTurn(pc) {
   const config = pc.getConfiguration()
@@ -25,6 +26,9 @@ export function buildIceConfiguration(servers, stage, relayOnly = false, current
 export function selectIceServers(servers, stage) {
   return servers.map((server) => ({ ...server, urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url) => {
     if (typeof url !== 'string') return false
+    // Cloudflare returns port 53 as an alternate, but Chromium and Firefox block it. Letting the
+    // browser probe it only creates a guaranteed timeout while the useful 3478 candidate is waiting.
+    if (/^(?:stun:stun|turn:turn)\.cloudflare\.com:53(?:[/?]|$)/i.test(url)) return false
     if (/^stuns?:/i.test(url)) return true
     if (stage === 'direct') return false
     if (stage === 'all') return /^turns?:/i.test(url)

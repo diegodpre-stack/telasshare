@@ -30,8 +30,14 @@ for (const mode of ['auto', 'turn', 'p2p']) {
   vm.runInContext(`${callback}\nglobalThis.makePeer = createPeer`, context)
   const entry = context.makePeer('test', 'friend', 'transmitter', mode)
   assert.equal(entry.turnTransport, mode === 'p2p' ? 'direct' : 'udp')
-  assert.equal([...timers.values()][0].delay, mode === 'p2p' ? 7_000 : 4_000)
+  // Creating the peer must not start the clock: shareWith arms it once the offer is actually sent, so
+  // the codec probe and offer building cannot eat the window ICE is supposed to get.
+  assert.equal(timers.size, 0, 'the fallback clock must not start before the offer is on the wire')
+  entry.armFallback()
+  assert.equal([...timers.values()][0].delay, mode === 'p2p' ? 7_000 : 3_000)
   assert.equal(timers.size, 1)
+  entry.armFallback()
+  assert.equal(timers.size, 1, 'arming twice must not stack two fallback timers')
   entry.pc.iceConnectionState = 'connected'; entry.pc.oniceconnectionstatechange()
   assert.equal(timers.size, 0, 'success cancels fallback')
   entry.pc.iceConnectionState = 'failed'; entry.pc.oniceconnectionstatechange()
@@ -49,4 +55,11 @@ for (const mode of ['auto', 'turn', 'p2p']) {
     assert.equal(timers.size, 0)
   }
 }
-console.log('PASS: initial UDP, success cancellation, post-success failure recovery, direct preservation and P2P isolation.')
+// Moving the clock out of createPeer only helps if shareWith still starts it. Nothing above can catch a
+// refactor that drops the call, and a transmitter that never falls back would strand every viewer whose
+// network needs the relay -- so assert on the source that arming follows the offer being sent.
+const shareWith = source.slice(source.indexOf('  const shareWith = async'), source.indexOf('  const watch ='))
+assert.ok(shareWith.includes('entry.armFallback()'), 'shareWith must arm the ICE fallback')
+assert.ok(shareWith.indexOf('entry.armFallback()') > shareWith.indexOf("send({ type: 'signal'"),
+  'the fallback clock must start after the offer is sent, never before')
+console.log('PASS: fallback armed only once the offer is sent, initial UDP, success cancellation, post-success failure recovery, direct preservation and P2P isolation.')

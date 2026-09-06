@@ -480,7 +480,16 @@ export default function App() {
         failConnection()
       }
     }
-    if (role === 'transmitter') entry.fallbackTimer = setTimeout(advanceFallback, mode === 'p2p' ? 7_000 : 4_000)
+    // Armed when the offer is on the wire, not here. Between the two sit the codec probe — up to a
+    // second of mediaCapabilities queries — and building the offer, none of which is ICE. Counting them
+    // made the window ICE actually gets depend on how quickly mediaCapabilities answers on a given
+    // machine: close to four seconds where it returns at once, three where it hits its timeout.
+    // The budget is cut by roughly what that work costs, so the relay is still tried at about the same
+    // moment on the clock and nobody waits longer than before to see a screen.
+    entry.armFallback = () => {
+      if (role !== 'transmitter' || entry.fallbackTimer) return
+      entry.fallbackTimer = setTimeout(advanceFallback, mode === 'p2p' ? 7_000 : 3_000)
+    }
     return entry
   }, [closeConnection, send])
 
@@ -828,6 +837,8 @@ export default function App() {
       offer.sdp = withStartBitrate(offer.sdp, Math.min(2500, Math.round(settings.maxBitrate / 1000 / 4)))
       phase = 'set-local-offer'
       await entry.pc.setLocalDescription(offer); send({ type: 'signal', to: peerId, connectionId, mode, turnTransport: entry.turnTransport, description: entry.pc.localDescription })
+      // The offer is out and candidates are gathering: from here the clock measures ICE and nothing else.
+      entry.armFallback()
       setViewers((current) => ({ ...current, [connectionId]: { peerId, route: 'connecting' } })); setNotice('Novo espectador conectado à sua transmissão.')
     } catch (error) {
       recordPeerFailure(phase, error, entry?.pc)

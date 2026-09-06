@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, ipcMain, session, shell } = require('electron')
+const { app, BrowserWindow, desktopCapturer, ipcMain, screen, session, shell } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
@@ -145,6 +145,19 @@ async function chooseDisplaySource(request, callback) {
   }
 }
 
+// desktopCapturer names a screen by Electron's display id and a window by its HWND, neither of which
+// GStreamer takes. A window becomes the handle it already carries -- the same shape the audio helper
+// parses out of these ids. A screen has to become a DXGI index, and the honest way to get one is the
+// position of that display in Electron's own list: the orders come from the same enumeration, so they
+// agree in practice, and the preview shows immediately when they do not.
+function describeSource(source) {
+  const window = /^window:(\d+):/.exec(source.id)
+  if (window) return { kind: 'window', windowHandle: Number(window[1]), name: source.name }
+  const display = /^screen:(\d+):/.exec(source.id)
+  const index = display ? screen.getAllDisplays().findIndex((item) => String(item.id) === display[1]) : -1
+  return { kind: 'monitor', monitorIndex: index >= 0 ? index : 0, name: source.name }
+}
+
 function configureSession() {
   const appSession = session.defaultSession
   appSession.setDisplayMediaRequestHandler(chooseDisplaySource)
@@ -196,6 +209,22 @@ function configureAudioBridge() {
   // Native capture keeps the frame on the GPU instead of paying Chromium's readback, but it is opt-in:
   // the page only offers the choice when this says the toolchain is actually installed.
   ipcMain.handle('native-capture-available', (event) => fromTrustedPage(event) && findGstreamer() !== null)
+  // The same picker the browser path uses, so choosing a source feels identical either way. Audio is
+  // not offered here yet: the native pipeline carries video only, and a checkbox that did nothing
+  // would be worse than its absence.
+  ipcMain.handle('native-pick-source', async (event) => {
+    if (!fromTrustedPage(event)) return null
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 320, height: 180 },
+        fetchWindowIcons: true,
+      })
+      if (!sources.length) return null
+      const result = await showSourcePicker(sources, false)
+      return result ? describeSource(result.source) : null
+    } catch { return null }
+  })
   ipcMain.handle('native-broadcast-start', async (event, options) => {
     if (!fromTrustedPage(event) || findGstreamer() === null) return false
     try { return await nativeBroadcastInstance().start(options && typeof options === 'object' ? options : {}) }

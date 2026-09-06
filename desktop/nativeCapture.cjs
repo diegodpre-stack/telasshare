@@ -44,14 +44,22 @@ function normalizeH264Profile(sdp) {
 
 const positiveInt = (value, fallback) => Number.isInteger(value) && value > 0 ? value : fallback
 
+// A window is captured by its HWND, which needs the Windows Graphics Capture backend; a monitor is
+// captured by index, where -1 means the primary one. Passing a handle wins, since someone who picked a
+// window meant that window and not whatever screen it happens to sit on.
+const sourceArgs = ({ windowHandle, monitorIndex }) => {
+  if (Number.isInteger(windowHandle) && windowHandle > 0) return ['capture-api=wgc', `window-handle=${windowHandle}`]
+  return [`monitor-index=${Number.isInteger(monitorIndex) && monitorIndex >= 0 ? monitorIndex : 0}`]
+}
+
 // One encoder, one WHIP session. Phase 3 turns this into a tee feeding several sinks; the encoder
 // settings below stay shared, which is the point -- today the app encodes once per viewer.
-function buildPipelineArgs({ endpoint, monitorIndex = 0, fps = 60, bitrateKbps = 12_000, showCursor = true } = {}) {
+function buildPipelineArgs({ endpoint, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true } = {}) {
   if (!endpoint) throw new Error('endpoint is required')
   return [
     '-e',
     'd3d11screencapturesrc',
-    `monitor-index=${Number.isInteger(monitorIndex) && monitorIndex >= 0 ? monitorIndex : 0}`,
+    ...sourceArgs({ windowHandle, monitorIndex }),
     `show-cursor=${showCursor ? 'true' : 'false'}`,
     '!', `video/x-raw(memory:D3D11Memory),framerate=${positiveInt(fps, 60)}/1`,
     // BGRA to NV12 on the GPU. Letting the encoder pull system memory here is the whole bug we are

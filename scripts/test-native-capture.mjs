@@ -57,6 +57,23 @@ for (const bad of [{ fps: 0 }, { fps: -5 }, { fps: 1.5 }, { fps: null }]) {
 assert.ok(buildPipelineArgs({ endpoint: 'http://x/whip', monitorIndex: -2 }).join(' ').includes('monitor-index=0'))
 assert.throws(() => buildPipelineArgs({}), /endpoint is required/, 'a pipeline with nowhere to send is a bug, not a default')
 
+// --- choosing what to capture ---------------------------------------------
+// A window is addressed by HWND and needs the Windows Graphics Capture backend; without that flag the
+// handle is ignored and the whole primary screen goes out instead, which is a privacy failure, not a
+// cosmetic one.
+const windowArgs = buildPipelineArgs({ endpoint: 'http://x/whip', windowHandle: 12345, monitorIndex: 2 }).join(' ')
+assert.ok(windowArgs.includes('window-handle=12345'))
+assert.ok(windowArgs.includes('capture-api=wgc'))
+assert.ok(!windowArgs.includes('monitor-index'), 'a chosen window must win over any monitor also passed')
+
+const monitorArgs = buildPipelineArgs({ endpoint: 'http://x/whip', monitorIndex: 2 }).join(' ')
+assert.ok(monitorArgs.includes('monitor-index=2') && !monitorArgs.includes('window-handle'))
+// A handle that is not one must fall back to a monitor rather than reach the command line.
+for (const bad of [0, -1, null, 'abc', 1.5]) {
+  const args = buildPipelineArgs({ endpoint: 'http://x/whip', windowHandle: bad, monitorIndex: 1 }).join(' ')
+  assert.ok(args.includes('monitor-index=1') && !args.includes('window-handle'), `bad handle ${bad} must not be used`)
+}
+
 // --- spawning -------------------------------------------------------------
 let spawned = null
 const fakeSpawn = (command, spawnArgs, options) => { spawned = { command, spawnArgs, options }; return { pid: 1 } }
@@ -72,4 +89,4 @@ assert.ok(spawned.options.env.PATH.startsWith('D:\\gst\\bin;'), 'the install dir
 assert.ok(spawned.options.env.PATH.includes('C:\\windows'), 'and the rest of PATH must survive')
 assert.equal(spawned.options.windowsHide, true, 'no console window may flash over a live broadcast')
 
-console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline, sane defaults and missing-install fallback.')
+console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, sane defaults and missing-install fallback.')

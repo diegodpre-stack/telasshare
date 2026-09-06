@@ -64,6 +64,11 @@ export function createNativeBroadcast({ onOffer, onCandidate, onViewerGone, onEr
   }
 
   return {
+    // The same picker the browser path opens, so choosing a source feels identical either way. Null
+    // means the person closed it without choosing, which is an answer and not a failure.
+    async pickSource() {
+      try { return (await api?.pickNativeSource?.()) || null } catch { return null }
+    },
     // False means the caller should use the capture that already works rather than fail the broadcast.
     async start(settings) {
       return (await api?.startNativeBroadcast?.(settings)) === true

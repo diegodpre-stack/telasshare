@@ -182,9 +182,17 @@ export function GlobalActions() {
 }
 function RemoteScreen({ screen, name, size, onStop }) {
   const videoRef = useRef(null)
+  const audioControlsTimerRef = useRef(null)
   const [muted, setMuted] = useState(false)
   const [volume, setVolume] = useState(1)
   const [audioBlocked, setAudioBlocked] = useState(false)
+  const [audioControlsVisible, setAudioControlsVisible] = useState(true)
+  const showAudioControls = useCallback(() => {
+    setAudioControlsVisible(true)
+    window.clearTimeout(audioControlsTimerRef.current)
+    audioControlsTimerRef.current = window.setTimeout(() => setAudioControlsVisible(false), 2500)
+  }, [])
+  const holdAudioControls = () => window.clearTimeout(audioControlsTimerRef.current)
   const play = useCallback(async () => {
     const video = videoRef.current; if (!video) return
     try { await video.play(); setAudioBlocked(false) }
@@ -200,17 +208,21 @@ function RemoteScreen({ screen, name, size, onStop }) {
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [play, screen.stream])
+  useEffect(() => {
+    if (screen.hasAudio) showAudioControls()
+    return () => window.clearTimeout(audioControlsTimerRef.current)
+  }, [screen.hasAudio, showAudioControls])
   const enableAudio = () => { const video = videoRef.current; if (!video) return; video.muted = false; setMuted(false); play() }
   const goFullscreen = () => { const frame = videoRef.current?.parentElement; return frame?.requestFullscreen?.() || videoRef.current?.webkitEnterFullscreen?.() }
   const connectionDetails = [screen.route === 'turn' ? 'TURN' : screen.route === 'p2p' ? 'P2P' : '', screen.route === 'turn' ? screen.relayProtocol || screen.protocol : screen.protocol, Number.isFinite(screen.rttMs) ? `${screen.rttMs} ms` : '', Number.isFinite(screen.receivedMbps) ? `${screen.receivedMbps} Mbps` : '', Number.isFinite(screen.packetLoss) ? `${screen.packetLoss}% perda` : ''].filter(Boolean).join(' · ')
   return <article className={`screen-card size-${size}`}>
     {screen.error && <p role="alert" className="hint">{screen.error}</p>}
     <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{Number.isFinite(screen.fps) ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}{connectionDetails ? ` · ${connectionDetails}` : ''}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
-    <div className="remote-frame" onDoubleClick={goFullscreen}>
+    <div className="remote-frame" onDoubleClick={goFullscreen} onPointerMove={screen.hasAudio ? showAudioControls : undefined} onPointerDown={screen.hasAudio ? showAudioControls : undefined}>
       <video ref={videoRef} autoPlay playsInline />
       {!screen.stream && <div className="video-placeholder overlay"><div className="spinner" /><strong>Aguardando a tela</strong></div>}
       {screen.hasAudio && audioBlocked && <button className="audio-unlock" onClick={enableAudio}><Volume2 size={16} />Ativar som</button>}
-      {screen.hasAudio && <div className="screen-audio" onDoubleClick={(event) => event.stopPropagation()}><button title={muted ? 'Ativar som' : 'Silenciar'} onClick={() => setMuted((current) => !current)}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0) }} aria-label={`Volume da tela de ${name}`} /><span>{Math.round((muted ? 0 : volume) * 100)}%</span></div>}
+      {screen.hasAudio && <div className={`screen-audio${audioControlsVisible ? ' visible' : ''}`} onDoubleClick={(event) => event.stopPropagation()} onPointerDown={(event) => { event.stopPropagation(); holdAudioControls() }} onPointerUp={showAudioControls} onPointerCancel={showAudioControls} onKeyDown={showAudioControls} onFocusCapture={showAudioControls}><button title={muted ? 'Ativar som' : 'Silenciar'} onClick={() => setMuted((current) => !current)}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0) }} aria-label={`Volume da tela de ${name}`} /><span>{Math.round((muted ? 0 : volume) * 100)}%</span></div>}
     </div>
   </article>
 }

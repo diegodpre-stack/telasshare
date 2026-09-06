@@ -15,7 +15,7 @@ const diagnosticsEnabled = (() => {
   } catch { return false }
 })()
 import { buildIceConfiguration, initialIceStage, canPreserveWithoutTurn } from './icePolicy.js'
-import { applySenderSettings } from './senderSettings.js'
+import { applySenderSettings, scaleForTarget } from './senderSettings.js'
 import { preferHardwareVideoCodecs } from './encoderSupport.js'
 import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
@@ -319,10 +319,11 @@ export default function App() {
   // the capture loop, on the thread that produces them. Measured on a 1440p screen asked for 1080p, that
   // cost about 4 ms per frame and took the source from 52 FPS to 47 before an encoder existed. Capture at
   // whatever the screen is and let the sender scale instead: that path is built for it and can use the GPU.
+  // The factor itself has to keep both encoded dimensions even, or the hardware encoder is dropped
+  // mid-broadcast; scaleForTarget carries that reasoning and the measurements behind it.
   const senderScaleFor = useCallback((target) => {
-    const height = localStreamRef.current?.getVideoTracks()[0]?.getSettings?.().height
-    if (!target || !Number.isFinite(height) || height <= target) return 1
-    return Math.round((height / target) * 100) / 100
+    const settings = localStreamRef.current?.getVideoTracks()[0]?.getSettings?.() || {}
+    return scaleForTarget(settings.width, settings.height, target)
   }, [])
   const readTransmissionSettings = useCallback(() => ({
     fps,

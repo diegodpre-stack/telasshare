@@ -88,7 +88,7 @@ app.post('/api/login', (req, res) => {
 app.get('/api/rooms', (req, res) => {
   const authenticated = readBearerSession(req)
   if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
-  res.json({ rooms: [...rooms.values()].map(({ id, name }) => ({ id, name })), role: authenticated.role })
+  res.json({ rooms: [...rooms.values()].map(({ id, name, password }) => ({ id, name, open: !password })), role: authenticated.role })
 })
 
 app.post('/api/rooms', (req, res) => {
@@ -96,10 +96,15 @@ app.post('/api/rooms', (req, res) => {
   if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
   const roomName = normalizeRoomName(req.body?.roomName)
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
-  if (roomName.length < 2 || password.length < 4 || password.length > 128) return res.status(400).json({ error: 'Informe um nome e uma senha com pelo menos 4 caracteres.' })
+  // An empty password means an open room. Anything else still has to be a real one: a two-character
+  // password would read as protection while offering none.
+  if (roomName.length < 2) return res.status(400).json({ error: 'Informe um nome com pelo menos 2 caracteres.' })
+  if (password.length > 0 && (password.length < 4 || password.length > 128)) {
+    return res.status(400).json({ error: 'A senha precisa ter de 4 a 128 caracteres, ou fique em branco para uma sala aberta.' })
+  }
   const key = roomKey(roomName)
   if (rooms.has(key)) return res.status(409).json({ error: 'Não foi possível criar essa sala. Escolha outro nome.' })
-  const room = { id: crypto.randomUUID(), name: roomName, password: hashPassword(password), ownerSub: authenticated.sub, bannedNames: new Set(), createdAt: Date.now(), deleteTimer: null }
+  const room = { id: crypto.randomUUID(), name: roomName, password: password ? hashPassword(password) : null, ownerSub: authenticated.sub, bannedNames: new Set(), createdAt: Date.now(), deleteTimer: null }
   rooms.set(key, room)
   scheduleRoomDeletion(room, key)
   res.status(201).json({ room: { id: room.id, name: room.name } })
@@ -112,7 +117,7 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
   const entry = [...rooms.entries()].find(([, candidate]) => candidate.id === req.params.roomId)
   const room = entry?.[1]
-  const valid = room && (authenticated.role === 'superadmin' || passwordMatches(password, room.password))
+  const valid = room && (authenticated.role === 'superadmin' || !room.password || passwordMatches(password, room.password))
   if (!valid) {
     attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
     return res.status(401).json({ error: 'Senha da sala incorreta.' })
@@ -120,7 +125,7 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
   loginAttempts.delete(attempt.ip)
   scheduleRoomDeletion(room, entry[0])
   const roomRole = authenticated.role === 'member' && room.ownerSub === authenticated.sub ? 'owner' : authenticated.role
-  res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: roomRole, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: roomRole, roomName: room.name })
+  res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: roomRole, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: roomRole, roomName: room.name, open: !room.password })
 })
 
 const turnConfiguration = () => ({

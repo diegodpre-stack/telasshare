@@ -13,10 +13,16 @@ import { fileURLToPath } from 'node:url'
 const projectRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const target = path.join(projectRoot, 'native', 'gstreamer')
 
+// The installer is Inno Setup and its destination depends on whether it ran per-user or for the whole
+// machine, so every plausible root is tried rather than assumed. CI settles it outright by finding the
+// executable itself and passing the directory in.
+const layout = (root) => path.join(root, 'gstreamer', '1.0', 'msvc_x86_64')
 const sources = [
   process.env.ENTRETELAS_GSTREAMER_DIR && path.dirname(process.env.ENTRETELAS_GSTREAMER_DIR),
-  process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'gstreamer', '1.0', 'msvc_x86_64'),
   process.env.GSTREAMER_1_0_ROOT_MSVC_X86_64,
+  process.env.LOCALAPPDATA && layout(path.join(process.env.LOCALAPPDATA, 'Programs')),
+  process.env.ProgramFiles && layout(process.env.ProgramFiles),
+  process.env['ProgramFiles(x86)'] && layout(process.env['ProgramFiles(x86)']),
   'C:\\gstreamer\\1.0\\msvc_x86_64',
 ].filter(Boolean)
 

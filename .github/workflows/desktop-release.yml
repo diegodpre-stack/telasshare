@@ -60,9 +60,25 @@ jobs:
           $process = Start-Process $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "GStreamer install failed ($($process.ExitCode))" }
 
+      # Where Inno puts it depends on whether it installed per-user or machine-wide, so the build looks
+      # for the executable rather than assuming a path -- assuming one is what failed here the first time.
       - name: Bundle GStreamer into the app
         shell: pwsh
-        run: node scripts/bundle-gstreamer.mjs
+        run: |
+          $roots = @("$env:LOCALAPPDATA\Programs", $env:ProgramFiles, ${env:ProgramFiles(x86)}, 'C:\') | Where-Object { $_ }
+          $found = $null
+          foreach ($root in $roots) {
+            $candidate = Join-Path $root 'gstreamer\1.0\msvc_x86_64\bin\gst-launch-1.0.exe'
+            if (Test-Path $candidate) { $found = Split-Path $candidate -Parent; break }
+          }
+          if (-not $found) {
+            Write-Host "Procurado em: $($roots -join ', ')"
+            Get-ChildItem "$env:LOCALAPPDATA\Programs", 'C:\' -Filter 'gstreamer' -Directory -EA SilentlyContinue | ForEach-Object { Write-Host "existe: $($_.FullName)" }
+            throw 'GStreamer installed but gst-launch-1.0.exe was not found'
+          }
+          Write-Host "GStreamer found at $found"
+          $env:ENTRETELAS_GSTREAMER_DIR = $found
+          node scripts/bundle-gstreamer.mjs
 
       - name: Build installer
         shell: pwsh

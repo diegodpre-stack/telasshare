@@ -4,17 +4,24 @@ import {
   DEFAULT_THRESHOLD_DB, MAX_THRESHOLD_DB, MIN_THRESHOLD_DB, SILENCE_DB,
 } from '../src/voiceInput.js'
 
-// A stand-in for Web Audio whose analyser reports whatever amplitude the test asks for.
+// A stand-in for Web Audio. Every node is named, so the wiring itself is something the test can read
+// back rather than something taken on trust, and the analyser reports whatever amplitude is asked for.
 function fakeContext() {
-  const state = { amplitude: 0, gains: [], connections: [] }
-  const node = (kind) => ({
-    kind,
-    connect(target) { state.connections.push([kind, target?.kind || 'destination']) },
-    disconnect() {},
+  const state = { amplitude: 0, gains: [], edges: new Set() }
+  let gains = 0
+  const node = (name) => ({
+    name,
+    connect(target) { state.edges.add(`${name}->${target?.name || 'destination'}`) },
+    disconnect(target) {
+      for (const edge of [...state.edges]) {
+        if (edge.startsWith(`${name}->`) && (!target || edge.endsWith(`->${target.name}`))) state.edges.delete(edge)
+      }
+    },
   })
   return {
     state,
     currentTime: 0,
+    wiring: () => [...state.edges].sort(),
     createMediaStreamSource: () => node('source'),
     createAnalyser: () => ({
       ...node('analyser'),
@@ -25,11 +32,22 @@ function fakeContext() {
       getFloatTimeDomainData(target) { target.fill(state.amplitude) },
     }),
     createGain: () => {
-      const gain = { value: 0, setTargetAtTime: (target) => { gain.value = target; state.gains.push(target) } }
-      return { ...node('gain'), gain }
+      gains += 1
+      // The gate is built first, the entry junction second.
+      const built = node(gains === 1 ? 'gate' : 'entry')
+      built.gain = { value: 0, setTargetAtTime: (target) => { built.gain.value = target; state.gains.push(target) } }
+      return built
     },
     createMediaStreamDestination: () => ({ stream: { id: 'processed', getAudioTracks: () => [{ stop() {} }] } }),
   }
+}
+
+// A model that takes as long to arrive as the test wants it to.
+function fakeSuppressor() {
+  let resolve
+  const ready = new Promise((r) => { resolve = r })
+  const node = { name: 'rnnoise', destroyed: false, connect() {}, disconnect() {}, destroy() { node.destroyed = true } }
+  return { node, create: () => ready, arrive: (value = node) => { resolve(value); return ready } }
 }
 
 const fakeStorage = (initial = {}) => {
@@ -41,11 +59,11 @@ const decibelsToAmplitude = (db) => 10 ** (db / 20)
 
 // Builds an input whose clock the test drives, so hold and release are checked as decisions rather than
 // as things that happen after a real wait.
-function harness({ storage = fakeStorage(), amplitude = 0 } = {}) {
+function harness({ storage = fakeStorage(), amplitude = 0, createSuppressor = null } = {}) {
   const context = fakeContext()
   context.state.amplitude = amplitude
   let clock = 10_000
-  const input = createVoiceInput({ audioContext: context, stream: { id: 'raw' }, storage, now: () => clock })
+  const input = createVoiceInput({ audioContext: context, stream: { id: 'raw' }, storage, createSuppressor, now: () => clock })
   return {
     input,
     context,
@@ -53,6 +71,15 @@ function harness({ storage = fakeStorage(), amplitude = 0 } = {}) {
     speak: (db) => { context.state.amplitude = decibelsToAmplitude(db) },
     // One tick per 25 ms of audio, which is what the interval does in the browser.
     run: (ticks, ms = 25) => { for (let i = 0; i < ticks; i += 1) { clock += ms; input.tick() } },
+    // Speech is not a level, it is a level that moves. A steady tone is a fan however loud it is, so
+    // anything standing in for a voice has to have syllables in it.
+    talk: (ticks, loudDb, quietDb = loudDb - 20, syllable = 6) => {
+      for (let i = 0; i < ticks; i += 1) {
+        context.state.amplitude = decibelsToAmplitude(Math.floor(i / syllable) % 2 ? quietDb : loudDb)
+        clock += 25
+        input.tick()
+      }
+    },
   }
 }
 
@@ -72,8 +99,51 @@ for (const bad of [undefined, null, NaN, 'alto', {}]) assert.equal(clampThreshol
 // --- the chain ------------------------------------------------------------
 // The raw microphone must never reach a connection: the gate sits between it and what peers get.
 const built = harness()
-assert.deepEqual(built.context.state.connections, [['source', 'analyser'], ['source', 'gain'], ['gain', 'destination']])
+assert.deepEqual(built.context.wiring(), ['entry->analyser', 'entry->gate', 'gate->destination', 'source->entry'])
 assert.equal(built.input.stream.id, 'processed', 'the stream handed out is the processed one')
+
+// --- the noise suppressor -------------------------------------------------
+// Loading a model takes as long as it takes, and voice has to work from the moment someone joins. So the
+// chain is complete without it, and the model is spliced in whenever it arrives.
+const model = fakeSuppressor()
+const withModel = harness({ createSuppressor: model.create })
+assert.equal(withModel.input.suppressionReady, false, 'not reported as running before it is')
+assert.deepEqual(withModel.context.wiring(), ['entry->analyser', 'entry->gate', 'gate->destination', 'source->entry'])
+withModel.speak(-20); withModel.run(2)
+assert.equal(withModel.input.open, true, 'and the microphone works in the meantime')
+
+await model.arrive()
+assert.equal(withModel.input.suppressionReady, true)
+assert.deepEqual(withModel.context.wiring(), ['entry->analyser', 'entry->gate', 'gate->destination', 'source->rnnoise'],
+  'the model sits ahead of everything, so the meter and the gate judge what it produced')
+
+// Turning it off puts the microphone straight back rather than leaving a dead node in the path.
+withModel.input.setSuppression(false)
+assert.deepEqual(withModel.context.wiring(), ['entry->analyser', 'entry->gate', 'gate->destination', 'source->entry'])
+withModel.input.setSuppression(true)
+assert.deepEqual(withModel.context.wiring(), ['entry->analyser', 'entry->gate', 'gate->destination', 'source->rnnoise'])
+
+// A model that fails to load must cost nothing more than itself.
+const failed = fakeSuppressor()
+const withoutModel = harness({ createSuppressor: failed.create })
+await failed.arrive(null)
+assert.equal(withoutModel.input.suppressionReady, false)
+assert.deepEqual(withoutModel.context.wiring(), ['entry->analyser', 'entry->gate', 'gate->destination', 'source->entry'])
+withoutModel.speak(-20); withoutModel.run(2)
+assert.equal(withoutModel.input.open, true, 'the microphone is unaffected by a model that never arrived')
+
+// One that lands after the session is over is released rather than left running.
+const late = fakeSuppressor()
+const closed = harness({ createSuppressor: late.create })
+closed.input.close()
+await late.arrive()
+assert.equal(late.node.destroyed, true, 'a model that arrives too late is destroyed, not leaked')
+
+// The choice is remembered, and defaults to on.
+const suppressionStorage = fakeStorage()
+assert.equal(harness({ storage: suppressionStorage }).input.suppression, true)
+harness({ storage: suppressionStorage }).input.setSuppression(false)
+assert.equal(harness({ storage: suppressionStorage }).input.suppression, false, 'turning it off survives the session')
 
 // --- the gate -------------------------------------------------------------
 const gate = harness({ storage: fakeStorage() })
@@ -106,14 +176,14 @@ assert.equal(gate.context.state.gains.at(-1), 0)
 // so a noisy room raises the bar rather than leaving the gate permanently open.
 const quiet = harness()
 quiet.speak(-72)
-quiet.run(130)
+quiet.run(400)
 const quietThreshold = quiet.input.thresholdDb
 assert.ok(quietThreshold > -72 && quietThreshold < -50, `a quiet room sits just above its own floor (${quietThreshold})`)
 assert.equal(quiet.input.open, false, 'and the room itself does not hold the gate open')
 
 const noisy = harness()
 noisy.speak(-45)
-noisy.run(130)
+noisy.run(400)
 assert.ok(noisy.input.thresholdDb > quietThreshold, 'a noisier room ends up with a higher bar')
 // The point of all of it: in either room, speech well above the floor still gets through.
 for (const room of [quiet, noisy]) {
@@ -125,28 +195,77 @@ for (const room of [quiet, noisy]) {
 // A single silent frame must not drop the floor and fling the gate open on everything after it.
 const dip = harness()
 dip.speak(-45)
-dip.run(100)
+dip.run(400)
 const settled = dip.input.thresholdDb
 dip.speak(-100)
 dip.run(2)
 dip.speak(-45)
 assert.ok(Math.abs(dip.input.thresholdDb - settled) <= 3, 'one silent frame barely moves the floor')
 
-// Sustained speech must not raise the bar to the speaker's own level. Measured in the browser before
-// this was fixed: a continuous voice drove the automatic threshold to the top of the scale, which would
-// have closed the gate on whoever was still talking.
+// Sustained speech must never gate out the person speaking. Measured in the browser before the headroom
+// cap existed: a continuous voice dragged the automatic threshold up past itself and would have cut off
+// whoever was still talking. The invariant is not that the bar holds still -- it is free to move -- but
+// that it can never climb above the voice it is listening to.
 const sustained = harness()
 sustained.speak(-65)
-sustained.run(130)
-const restingThreshold = sustained.input.thresholdDb
-sustained.speak(-18)
 sustained.run(400)
-assert.equal(sustained.input.open, true, 'someone talking for ten seconds is still being heard at the end of it')
-assert.equal(sustained.input.thresholdDb, restingThreshold, 'and their own voice never became the noise floor')
-// Once they stop, the room is measured again as usual.
+const restingThreshold = sustained.input.thresholdDb
+// Checked all the way through rather than only at the end, because the failure was gradual.
+for (let step = 1; step <= 40; step += 1) {
+  sustained.talk(10, -18)
+  assert.equal(sustained.input.open, true, `still heard after ${step * 250} ms of unbroken speech`)
+  assert.ok(sustained.input.thresholdDb < -18, `the bar stayed under the voice at ${step * 250} ms`)
+}
+// Once they stop, the room is measured again as usual and the bar goes back to being about the room.
 sustained.speak(-65)
-sustained.run(130)
+sustained.run(400)
 assert.ok(Math.abs(sustained.input.thresholdDb - restingThreshold) <= 2, 'and the floor is picked back up afterwards')
+assert.equal(sustained.input.open, false)
+
+// The deadlock: the window is only filled while the gate is shut, so anything holding it open freezes
+// the window, the room is never measured again and the gate never closes. Measured in the browser as a
+// microphone stuck open. Whatever opens it, it has to be able to shut again.
+const unstick = harness()
+unstick.talk(400, -30)
+assert.equal(unstick.input.open, true)
+unstick.speak(-70)
+unstick.run(600)
+assert.equal(unstick.input.open, false, 'the gate still shuts once the speaking stops')
+
+// The same deadlock reached the other way: a sound that arrives loud, holds the gate open, and never
+// varies. The window has to start moving again on its own rather than waiting for a silence that is
+// not coming.
+const stuckOpen = harness()
+stuckOpen.talk(100, -25)
+assert.equal(stuckOpen.input.open, true, 'speech opens it')
+stuckOpen.speak(-25)
+stuckOpen.run(1200)
+assert.equal(stuckOpen.input.open, false, 'and a steady drone at the same level is eventually shut out')
+
+// A fan is not a voice however loud it gets. Level alone cannot tell them apart -- a first attempt drew
+// the line at a level and steady noise just above it held the gate open indefinitely, measured in the
+// browser. What separates them is that speech moves and a fan does not.
+for (const fan of [-60, -46, -38, -30]) {
+  const room = harness()
+  room.speak(fan)
+  room.run(400)
+  assert.equal(room.input.open, false, `steady noise at ${fan} dB is still noise`)
+  assert.ok(room.input.thresholdDb > fan, `and the bar sits above it (${room.input.thresholdDb})`)
+}
+
+// Joining while sound is already arriving must not lock the gate shut. The window gets seeded from
+// whatever is present, and if that is a voice rather than a room, a bar set from the floor lands above
+// it. Measured in the browser before this was fixed: a bar of -21 dB against a steady -32 dB signal,
+// which is a microphone that stays off until the room happens to go quiet for three seconds.
+const joinedTalking = harness()
+joinedTalking.talk(200, -32)
+assert.ok(joinedTalking.input.thresholdDb < -32, `the bar stays under what is being heard (${joinedTalking.input.thresholdDb})`)
+assert.equal(joinedTalking.input.open, true, 'so whoever was already speaking is heard')
+// And once they stop, the room is measured properly and the bar goes back to being about the room.
+joinedTalking.speak(-68)
+joinedTalking.run(200)
+assert.ok(joinedTalking.input.thresholdDb > -68 && joinedTalking.input.thresholdDb < -45, 'the room takes over again')
+assert.equal(joinedTalking.input.open, false)
 
 // --- what is remembered ---------------------------------------------------
 // Moving the slider is a statement that the automatic choice was wrong, so it takes over rather than
@@ -158,7 +277,7 @@ chosen.input.setThreshold(-38)
 assert.equal(chosen.input.auto, false)
 assert.equal(chosen.input.thresholdDb, -38)
 chosen.speak(-70)
-chosen.run(130)
+chosen.run(400)
 assert.equal(chosen.input.thresholdDb, -38, 'and the floor does not move a threshold that was set by hand')
 
 const reopened = harness({ storage })
@@ -187,4 +306,4 @@ assert.equal(meter.input.open, false)
 assert.ok(meter.input.level > 0, 'a gated microphone still reports its level')
 assert.ok(meter.input.level < meter.input.thresholdLevel, 'and reads below the marker, which is why it is closed')
 
-console.log('PASS: decibel scale and clamping, the raw microphone never reaching a connection, the gate opening instantly and closing on a hold, an automatic threshold that follows the room without chasing one silent frame, a manual choice that persists and wins, and a meter that reads before the gate.')
+console.log('PASS: decibel scale and clamping, a model spliced in when it arrives and removed when refused, the raw microphone never reaching a connection, the gate opening instantly and closing on a hold, an automatic threshold that follows the room without chasing one silent frame, a manual choice that persists and wins, and a meter that reads before the gate.')

@@ -368,7 +368,7 @@ export default function App() {
   const [voiceDeafened, setVoiceDeafened] = useState(false)
   const [voiceConnections, setVoiceConnections] = useState([])
   const [voiceLevels, setVoiceLevels] = useState({ peers: {}, self: 0, thresholdLevel: 0, thresholdDb: 0, open: false })
-  const [voiceSensitivity, setVoiceSensitivity] = useState({ auto: true, manualDb: 0 })
+  const [voiceSensitivity, setVoiceSensitivity] = useState({ auto: true, manualDb: 0, suppression: true, suppressionReady: false })
   // Bumped whenever a volume changes, so the sliders redraw. The values themselves live in the mixer,
   // which owns them and persists them; duplicating them into React state would give two sources of truth.
   const [voiceRevision, setVoiceRevision] = useState(0)
@@ -504,7 +504,17 @@ export default function App() {
     const mixer = createVoiceMixer({ onChange: () => setVoiceRevision((current) => current + 1) })
     // The raw microphone is never what peers receive. It goes through the gate first, and the processed
     // stream is what the connections and the mute switch are given.
-    const input = createVoiceInput({ stream: microphone })
+    // Loaded on demand: nobody who only ever watches a screen should download a speech model. It is
+    // handed in rather than imported by voiceInput, which keeps that file testable outside a browser.
+    const createSuppressor = (context) => import('./noiseSuppressor.js')
+      .then((module) => module.createRnnoiseSuppressor(context))
+      .catch(() => null)
+    const input = createVoiceInput({
+      stream: microphone,
+      createSuppressor,
+      // The model arrives some time after the call starts, and the switch has to stop saying "carregando".
+      onChange: () => setVoiceSensitivity({ auto: input.auto, manualDb: input.manualThresholdDb, suppression: input.suppression, suppressionReady: input.suppressionReady }),
+    })
     input.start()
     mixer.useMicrophone(input.stream)
     // Clicking the button is the gesture browsers wait for, so this is the moment the context can start.
@@ -529,7 +539,7 @@ export default function App() {
     })
     voice.setLocalStream(input.stream)
     mixerRef.current = mixer; voiceRef.current = voice; voiceMicRef.current = microphone; voiceInputRef.current = input
-    setVoiceSensitivity({ auto: input.auto, manualDb: input.manualThresholdDb })
+    setVoiceSensitivity({ auto: input.auto, manualDb: input.manualThresholdDb, suppression: input.suppression, suppressionReady: input.suppressionReady })
     voiceJoinedRef.current = true
     setVoiceJoined(true); setVoiceMuted(false); setVoiceDeafened(false)
     send({ type: 'voice-join' })
@@ -574,9 +584,10 @@ export default function App() {
   const setPeerVolume = (name, value) => mixerRef.current?.setVolume(name, value)
   // The control from the Discord screenshot: below this level nothing is sent at all, which is what
   // actually stops a keyboard. Automatic reads the room's own quiet and sits just above it.
-  const readSensitivity = (input) => setVoiceSensitivity({ auto: input.auto, manualDb: input.manualThresholdDb })
+  const readSensitivity = (input) => setVoiceSensitivity({ auto: input.auto, manualDb: input.manualThresholdDb, suppression: input.suppression, suppressionReady: input.suppressionReady })
   const setVoiceAuto = (value) => { const input = voiceInputRef.current; if (input) { input.setAuto(value); readSensitivity(input) } }
   const setVoiceThreshold = (value) => { const input = voiceInputRef.current; if (input) { input.setThreshold(value); readSensitivity(input) } }
+  const setVoiceSuppression = (value) => { const input = voiceInputRef.current; if (input) { input.setSuppression(value); readSensitivity(input) } }
 
   // One sweep across every peer we are transmitting to, only while the preview panel that shows the
   // result is open. Closing it stops the sampling; the numbers resume from the next sweep.
@@ -1239,7 +1250,7 @@ export default function App() {
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
     <section className="voice-bar" aria-label="Áudio da sala">{!voiceJoined
       ? <button type="button" className="voice-join" onClick={joinVoice}><PhoneCall size={17} /><span><strong>Entrar no áudio</strong><small>{users.filter((user) => user.voice).length ? `${users.filter((user) => user.voice).length} na conversa agora` : 'ninguém na conversa ainda'}</small></span></button>
-      : <><div className="voice-self"><span className={`voice-meter input${voiceMuted ? ' silent' : voiceLevels.open ? ' open' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.self || 0)})` }} /><b style={{ left: `${Math.round((voiceLevels.thresholdLevel || 0) * 100)}%` }} /></span><div><strong>Você está no áudio</strong><small>{voiceMuted ? 'microfone desligado' : voiceStatus}</small></div></div><div className="voice-actions"><button type="button" className={voiceMuted ? 'off' : ''} onClick={toggleMute} aria-pressed={voiceMuted}>{voiceMuted ? <MicOff size={16} /> : <Mic size={16} />}{voiceMuted ? 'Microfone desligado' : 'Microfone ligado'}</button><button type="button" className={voiceDeafened ? 'off' : ''} onClick={toggleDeafen} aria-pressed={voiceDeafened}>{voiceDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}{voiceDeafened ? 'Não está ouvindo' : 'Ouvindo todos'}</button><button type="button" className="leave-voice" onClick={() => leaveVoice(true)}><PhoneOff size={16} />Sair do áudio</button></div><div className="voice-sensitivity"><label className="voice-auto"><input type="checkbox" checked={voiceSensitivity.auto} onChange={(event) => setVoiceAuto(event.target.checked)} />Ajustar a sensibilidade automaticamente</label><input type="range" min={MIN_THRESHOLD_DB} max={MAX_THRESHOLD_DB} step="1" value={voiceSensitivity.auto ? Math.round(voiceLevels.thresholdDb || MIN_THRESHOLD_DB) : voiceSensitivity.manualDb} disabled={voiceSensitivity.auto} onChange={(event) => setVoiceThreshold(event.target.value)} aria-label="Sensibilidade do microfone" /><span>{voiceSensitivity.auto ? `${Math.round(voiceLevels.thresholdDb || 0)} dB · automático` : `${voiceSensitivity.manualDb} dB`}</span><p className="hint">Abaixo desse nível nada é enviado. É o que segura teclado e batida na mesa enquanto você não está falando — fale normalmente e veja onde a barra chega.</p></div></>}</section>
+      : <><div className="voice-self"><span className={`voice-meter input${voiceMuted ? ' silent' : voiceLevels.open ? ' open' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.self || 0)})` }} /><b style={{ left: `${Math.round((voiceLevels.thresholdLevel || 0) * 100)}%` }} /></span><div><strong>Você está no áudio</strong><small>{voiceMuted ? 'microfone desligado' : voiceStatus}</small></div></div><div className="voice-actions"><button type="button" className={voiceMuted ? 'off' : ''} onClick={toggleMute} aria-pressed={voiceMuted}>{voiceMuted ? <MicOff size={16} /> : <Mic size={16} />}{voiceMuted ? 'Microfone desligado' : 'Microfone ligado'}</button><button type="button" className={voiceDeafened ? 'off' : ''} onClick={toggleDeafen} aria-pressed={voiceDeafened}>{voiceDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}{voiceDeafened ? 'Não está ouvindo' : 'Ouvindo todos'}</button><button type="button" className="leave-voice" onClick={() => leaveVoice(true)}><PhoneOff size={16} />Sair do áudio</button></div><div className="voice-sensitivity"><label className="voice-auto"><input type="checkbox" checked={voiceSensitivity.auto} onChange={(event) => setVoiceAuto(event.target.checked)} />Ajustar a sensibilidade automaticamente</label><label className="voice-auto"><input type="checkbox" checked={voiceSensitivity.suppression} onChange={(event) => setVoiceSuppression(event.target.checked)} />Supressão de ruído{voiceSensitivity.suppression && !voiceSensitivity.suppressionReady ? ' · carregando' : ''}</label><input type="range" min={MIN_THRESHOLD_DB} max={MAX_THRESHOLD_DB} step="1" value={voiceSensitivity.auto ? Math.round(voiceLevels.thresholdDb || MIN_THRESHOLD_DB) : voiceSensitivity.manualDb} disabled={voiceSensitivity.auto} onChange={(event) => setVoiceThreshold(event.target.value)} aria-label="Sensibilidade do microfone" /><span>{voiceSensitivity.auto ? `${Math.round(voiceLevels.thresholdDb || 0)} dB · automático` : `${voiceSensitivity.manualDb} dB`}</span><p className="hint">Abaixo desse nível nada é enviado — é o que segura teclado e batida na mesa enquanto você não está falando. Fale normalmente e veja onde a barra chega. A supressão de ruído limpa o que passa: ótima com ventoinha, ar-condicionado e chiado, parcial com estalo seco de tecla.</p></div></>}</section>
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
     <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>
     {nativeAvailable && <label className="size-control">Captura da sua tela<select value={nativeWanted ? 'nativa' : 'navegador'} onChange={(event) => setNativeWanted(event.target.value === 'nativa')} disabled={isBroadcasting}><option value="navegador">Navegador (padrão)</option><option value="nativa">Nativa — experimental</option></select><span>{isBroadcasting ? 'Não muda uma transmissão já iniciada.' : 'A nativa mantém o quadro na placa de vídeo e sustenta 60 FPS em 1440p. O som é o do sistema inteiro, sem o do próprio TelasShare.'}</span></label>}

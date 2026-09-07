@@ -1,6 +1,6 @@
 # TelasShare — compartilhamento privado de tela
 
-Primeira versão funcional de compartilhamento privado de tela. O navegador do transmissor exige clique explícito e escolha manual da tela. O projeto não oferece controle remoto, clipboard, arquivos nem captura silenciosa.
+Compartilhamento privado de tela entre amigos. Transmitir exige clique explícito e escolha manual da tela. O projeto não oferece controle remoto, clipboard, arquivos nem captura silenciosa.
 
 O aplicativo aceita várias transmissões simultâneas: uma tela pode ser enviada para vários amigos, cada pessoa pode transmitir enquanto assiste outras telas, e o painel oferece tamanhos Pequeno, Médio e Grande, além de tela cheia por transmissão.
 
@@ -75,7 +75,7 @@ O site oferece em todas as telas uma versão portátil (`TelasShare-Portable.exe
 
 Ao iniciar uma captura no aplicativo, o seletor mostra as telas e janelas disponíveis. Nada pode iniciar a captura silenciosamente. Tela inteira pode incluir todo o áudio do sistema. No Windows 10 build 20348 ou posterior, uma janela usa um capturador WASAPI nativo por processo: ele inclui a árvore de processos do aplicativo escolhido e exclui Discord e outros programas. Se esse recurso não estiver disponível, a janela é transmitida sem áudio em vez de usar silenciosamente o áudio completo do computador. Na versão web, selecione uma guia no Chrome/Edge para compartilhar apenas o áudio dela.
 
-O aplicativo se chamava EntreTelas até a versão 0.1.84. O nome visível mudou, mas o `appId` (`com.entretelas.desktop`), as chaves de `localStorage` (`entretelas-*`) e as variáveis de ambiente (`ENTRETELAS_*`) continuam com o nome antigo de propósito: o `appId` é a identidade da instalação para o Windows, e trocá-lo faria a atualização instalar uma segunda cópia ao lado da primeira em vez de substituí-la; trocar as chaves apagaria o nome e as preferências já salvas de quem usa. São identificadores internos, que ninguém vê.
+O aplicativo se chamava EntreTelas até a versão 0.1.84. O `appId` (`com.entretelas.desktop`), as chaves de `localStorage` (`entretelas-*`) e as variáveis `ENTRETELAS_*` mantêm o nome antigo de propósito: o `appId` é a identidade da instalação para o Windows, e trocá-lo faria a próxima atualização instalar uma segunda cópia ao lado da primeira; renomear as chaves apagaria o nome e as preferências de quem já usa.
 
 Cada push na branch `main` executa `.github/workflows/desktop-release.yml`, gera uma versão nova e publica `TelasShare-Portable.exe` e `TelasShare-Setup.exe` nas Releases do GitHub. A versão instalada verifica essa fonte ao abrir, baixa atualizações em segundo plano e oferece reinicialização imediata quando a nova versão fica pronta. A versão portátil precisa ser substituída por um novo download quando houver atualização. Sem um certificado comercial de assinatura, o Windows pode exibir o aviso de editor desconhecido na primeira execução.
 
@@ -93,25 +93,42 @@ $env:ENTRETELAS_APP_URL = 'http://localhost:8787'
 npm run desktop
 ```
 
-O endereço alternativo aceita apenas loopback e é ignorado no aplicativo empacotado. Abra `http://localhost:8787` no navegador para entrar como espectador. Para verificar o encoder, use uma transmissão nova com movimento na tela, escolha **Automático** ou **H.264** e confira **Implementação** e **Encoder eficiente informado** no diagnóstico. A consulta de capacidade por perfil é uma indicação, não uma garantia; `OpenH264` é software, enquanto `MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)` identifica o encoder NVIDIA. Hardware não garante, por si só, mais FPS na captura ou na prévia.
-
-#### Compatibilidade de captura e H.264
-
-A captura zero-copy e a codificação por hardware são independentes. O desktop agora deixa `ZeroCopyDesktopCapture` desativado por padrão, mas continua permitindo encoders de hardware e priorizando os perfis eficientes informados pelo navegador. Isso evita forçar o caminho experimental de captura em todas as GPUs; não é uma confirmação de que um problema específico de driver foi corrigido. As proteções de drivers do Chromium continuam ativas.
-
-Essa alteração exige reiniciar o desktop com o código novo (ou instalar uma nova versão empacotada); atualizar somente o site não altera as flags do processo. O diagnóstico mostra a política de captura, o perfil H.264 negociado e os contadores de quadros codificados/recebidos/decodificados. O relatório mantém eventos de encerramento da captura e falhas de negociação mesmo depois que a transmissão desaparece, além de falhas do processo GPU no desktop novo. Não inclui conteúdo da tela, SDP, IPs ou mensagens brutas de exceções.
-
-Para comparar a captura experimental em um teste controlado, use `$env:ENTRETELAS_GPU_CAPTURE = '1'` antes de iniciar o desktop. Remova a variável para voltar ao novo padrão. O valor legado `0` também restaura a política padrão do Chromium que pode preferir software em resoluções baixas; não use esse valor para verificar que o encoder permanece em hardware. Nenhuma dessas configurações garante suporte ou estabilidade em um driver específico.
-
-Testes de regressão: `node scripts/test-encoder-support.mjs`, `node scripts/test-media-runtime.mjs` e `node scripts/test-media-diagnostics.mjs`. A validação real deve conferir quadros decodificados e imagem no receptor, além de `powerEfficientEncoder` no transmissor. Um teste NVIDIA→NVIDIA não comprova compatibilidade AMD→NVIDIA ou NVIDIA→AMD.
-
-Para voltar ao serviço publicado ou gerar o instalador:
+O endereço alternativo aceita apenas loopback e é ignorado no aplicativo empacotado. Abra `http://localhost:8787` no navegador para entrar como espectador. Para voltar ao serviço publicado, remova a variável:
 
 ```powershell
 Remove-Item Env:ENTRETELAS_APP_URL -ErrorAction SilentlyContinue
 npm run desktop
+```
+
+Gerar o instalador localmente exige o GStreamer instalado, porque `scripts/bundle-gstreamer.mjs` copia o runtime para dentro do pacote:
+
+```powershell
+node scripts/bundle-gstreamer.mjs
 npm run desktop:dist
 ```
+
+#### Captura nativa
+
+O aplicativo pode capturar e codificar fora do Chromium, num processo GStreamer separado. O motivo é medido: o Chromium lê cada quadro de volta da GPU para a memória do sistema e o converte para I420 numa única thread antes de qualquer encoder. Em 2560×1440 isso são 14,7 MB por quadro e cerca de 23 ms de trabalho, contra um orçamento de 16,6 ms a 60 FPS — o que trava a captura perto de 41 FPS. O pipeline nativo mantém o quadro na GPU até dentro do encoder; na mesma máquina, a mesma tela sustentou 60 FPS sem quadros perdidos.
+
+A opção fica em **Captura da sua tela**, desligada por padrão, e só aparece onde há um encoder utilizável. O runtime do GStreamer vai dentro do instalador, então não há nada para instalar à parte.
+
+O que muda em relação ao caminho do navegador:
+
+- O bitrate é escolhido no início a partir da resolução e do FPS, e não se adapta à rede depois. O encoder ainda gasta menos em cenas paradas e mais em movimento, mas não recua porque a conexão de alguém piorou.
+- A prévia funciona pelo próprio aplicativo assistindo a si mesmo, o que custa um pipeline extra enquanto estiver aberta.
+- O diagnóstico não mostra FPS nem rota do lado do envio: essas estatísticas vivem dentro do `webrtcbin`, fora do alcance da página.
+- O áudio é o do sistema, menos o do próprio aplicativo — sem isso a transmissão devolveria aos amigos a voz deles mesmos.
+
+Uma janela precisa estar visível para ser capturada. Minimizada, coberta ou em tela cheia exclusiva ela não gera quadros, e o aplicativo avisa em vez de ficar esperando.
+
+Se o pipeline não iniciar, a transmissão usa o caminho do navegador e diz o motivo. Testes de regressão: `node scripts/test-native-capture.mjs`, `node scripts/test-whip-bridge.mjs` e `node scripts/test-native-broadcast.mjs`.
+
+#### Verificar o encoder
+
+O diagnóstico mostra o perfil H.264 negociado e os contadores de quadros codificados, recebidos e decodificados, e mantém eventos de encerramento da captura e falhas de negociação mesmo depois que a transmissão desaparece. Não inclui conteúdo da tela, SDP, IPs nem mensagens brutas de exceções.
+
+Para conferir, use uma transmissão com movimento na tela e olhe **Implementação** e **Encoder eficiente informado**: `OpenH264` é software. A consulta de capacidade por perfil é uma indicação, não uma garantia, e hardware por si só não garante mais FPS na captura. Um teste NVIDIA→NVIDIA não comprova compatibilidade AMD→NVIDIA ou NVIDIA→AMD.
 
 ### Salas privadas
 
@@ -154,10 +171,13 @@ npm start
 ## Presets de transmissão
 
 - Resolução: Auto, 720p, 1080p e 1440p
-- FPS: 30, 60 e 120 (preferência; o valor real depende do navegador, display, GPU e rede)
-- Bitrate: Baixa 2,5 Mbps, Média 8 Mbps, Alta 14 Mbps ou valor personalizado
+- FPS preferido: 30 ou 60 (o valor real depende da tela, da GPU e da rede)
+- Codec: Automático, H.264, AV1, VP9 ou VP8
+- Áudio: transmitir som ou somente vídeo
 
-As preferências são aplicadas nas constraints de `getDisplayMedia` e, quando o navegador permite, em `RTCRtpSender.setParameters()` com `maxBitrate` e `maxFramerate`. A interface tenta mostrar o FPS efetivo usando configurações da track e estatísticas WebRTC.
+A captura sempre usa o tamanho nativo da tela e a redução acontece no envio: pedir um quadro menor na captura obriga o navegador a encolher cada um deles na thread que os produz, e isso custa FPS antes mesmo de codificar.
+
+No caminho do navegador não há escolha de bitrate. O teto é de 20 Mbps por espectador e o Chromium decide o valor real, subindo e descendo conforme a rede — o número que aparece no diagnóstico é o que ele escolheu, não um limite fixo. No caminho nativo o bitrate é derivado da resolução e do FPS, porque nada ali o ajusta depois.
 
 ## Limites e segurança desta primeira versão
 

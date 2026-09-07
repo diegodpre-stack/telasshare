@@ -345,7 +345,12 @@ export default function App() {
   // per-viewer PeerConnections that would normally hold this do not exist on the native path.
   const nativeViewersRef = useRef(new Map())
   const nativeActiveRef = useRef(false)
+  // The socket handler and the native error handler are created once and close over an old render, so
+  // what they need from the current one has to travel in refs.
+  const broadcastingRef = useRef(false)
+  const stopSharingRef = useRef(null)
   useEffect(() => { nativeActiveRef.current = nativeActive }, [nativeActive])
+  useEffect(() => { broadcastingRef.current = broadcasting }, [broadcasting])
   const [showPeople, setShowPeople] = useState(true)
   const socketRef = useRef(null)
   const pcsRef = useRef(new Map())
@@ -412,15 +417,21 @@ export default function App() {
         if (peerId) send({ type: 'stop', to: peerId, connectionId })
         setViewers((current) => { const next = { ...current }; delete next[connectionId]; return next })
       },
-      onError: (_connectionId, reason) => setNotice(reason === 'gstreamer-missing'
+      onError: (_connectionId, reason) => {
+        // Nothing here has a track, so nothing fires videoTrack.onended when the source disappears --
+        // the window closes, the game exits, the screen is unplugged. Eight seconds without a frame is
+        // that, and a broadcast still advertised after it only offers people something that cannot work.
+        if (reason === 'no-frames' && nativeActiveRef.current) stopSharingRef.current?.(true)
+        setNotice(reason === 'gstreamer-missing'
         ? 'A captura nativa não está disponível nesta máquina. Desligue a opção para transmitir pelo navegador.'
         : reason === 'no-frames'
-          ? 'A fonte escolhida não produziu imagem. Uma janela precisa estar visível para ser capturada — minimizada, coberta ou em tela cheia exclusiva ela não gera quadros. Tente a tela inteira.'
+          ? 'A transmissão foi encerrada: a fonte parou de gerar imagem. Uma janela precisa estar visível — minimizada, coberta ou em tela cheia exclusiva ela não gera quadros. Inicie de novo, ou escolha a tela inteira.'
           : reason === 'pipeline-failed'
             ? 'A captura nativa falhou ao iniciar. Desligue a opção para transmitir pelo navegador.'
             // Anything else is the pipeline's own words, which name the fault far better than a generic
             // message can -- a missing element, a busy encoder, a source that vanished.
-            : `A captura nativa falhou: ${reason}`),
+            : `A captura nativa falhou: ${reason}`)
+      },
     })
     nativeRef.current = native
     return () => { native.dispose(); nativeRef.current = null }
@@ -485,6 +496,7 @@ export default function App() {
     setBroadcasting(false)
     send({ type: 'broadcast-stop' }); setViewers({}); setNotice('Sua transmissão foi encerrada. As telas que você assiste continuam abertas.')
   }, [closeConnection, send])
+  stopSharingRef.current = stopSharing
   const closeAll = useCallback(() => {
     if (localStreamRef.current) mediaEvents.record('capture-closed-with-room')
     earlyCandidatesRef.current.clear()
@@ -776,7 +788,7 @@ export default function App() {
       socket.onerror = () => { if (!disposed) setNotice('Oscilação no servidor de sinalização. Tentando reconectar…') }
       socket.onmessage = ({ data }) => {
         let message; try { message = JSON.parse(data) } catch { return }
-        if (message.type === 'welcome') { setSelfId(message.id); setModerationRole(message.role); setIsAdmin(['owner', 'admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName) }
+        if (message.type === 'welcome') { setSelfId(message.id); setModerationRole(message.role); setIsAdmin(['owner', 'admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName); if (broadcastingRef.current) send({ type: 'broadcast-start' }) }
         else if (message.type === 'users') {
           const nextIds = new Set(message.users.map((user) => user.id))
           if (knownUsersRef.current && message.users.some((user) => user.id !== selfId && !knownUsersRef.current.has(user.id))) playChime('join')

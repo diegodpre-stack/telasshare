@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback } =
+import path from 'node:path'
+const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv } =
   createRequire(import.meta.url)('../desktop/nativeCapture.cjs')
 
 // --- finding the install -------------------------------------------------
@@ -16,6 +17,42 @@ assert.equal(findGstreamer({ ENTRETELAS_GSTREAMER_DIR: 'D:\\gst\\bin' }, () => t
 assert.equal(findGstreamer({}, () => false), null, 'no install must be reported, not guessed')
 // Order matters: the override is consulted before anything found on disk.
 assert.equal(findGstreamer({ ENTRETELAS_GSTREAMER_DIR: 'D:\\gst\\bin', LOCALAPPDATA: 'C:\\u' }, () => true), 'D:\\gst\\bin')
+
+// The bundled copy wins over anything installed on the machine: a packaged app must not depend on what
+// the user happens to have, and versions that disagree are the one failure here that really crashes.
+const resources = path.join('C:', 'App', 'resources')
+const bundled = path.join(resources, 'gstreamer', 'bin')
+assert.equal(findGstreamer({ LOCALAPPDATA: 'C:' }, () => true, resources), bundled)
+// An explicit override still beats it, for testing another build.
+assert.equal(findGstreamer({ ENTRETELAS_GSTREAMER_DIR: 'D:' }, () => true, resources), 'D:')
+// Running from source there is no bundle, so an installed one is still found.
+assert.equal(
+  findGstreamer({ LOCALAPPDATA: 'C:' }, (candidate) => !candidate.includes('resources'), resources),
+  path.join('C:', 'Programs', 'gstreamer', '1.0', 'msvc_x86_64', 'bin'),
+)
+
+// --- keeping someone else's GStreamer out of ours -------------------------
+// A machine with its own install also has GST_* variables pointing at it. Inheriting those loads our
+// plugins against their core libraries, which is a crash rather than a quiet fallback.
+const dirty = {
+  PATH: 'C:/windows',
+  GST_PLUGIN_PATH: 'C:/theirs/plugins',
+  GST_PLUGIN_SYSTEM_PATH: 'C:/theirs/system',
+  GST_REGISTRY: 'C:/theirs/registry.bin',
+  GST_DEBUG: '4',
+  KEEP_ME: 'yes',
+}
+const clean = pipelineEnv(dirty, bundled)
+assert.equal(clean.GST_PLUGIN_PATH, path.join(resources, 'gstreamer', 'lib', 'gstreamer-1.0'), 'plugins come from our own copy')
+// Empty, not absent: absent means "use the built-in default", which is the other installation.
+assert.equal(clean.GST_PLUGIN_SYSTEM_PATH, '')
+assert.equal(clean.GST_DEBUG, undefined, 'no inherited GST_ variable may survive')
+assert.equal(clean.GST_REGISTRY, undefined, 'not even the registry, unless we set it ourselves')
+assert.equal(clean.KEEP_ME, 'yes', 'the rest of the environment is none of our business')
+assert.ok(clean.PATH.startsWith(`${bundled};`), 'our bin has to lead PATH')
+assert.ok(clean.PATH.includes('C:/windows'))
+// The registry has to be writable, and only the app knows where that is.
+assert.equal(pipelineEnv({ ...dirty, ENTRETELAS_GST_REGISTRY: 'C:/ours/reg.bin' }, bundled).GST_REGISTRY, 'C:/ours/reg.bin')
 
 // --- the profile Chrome will actually accept ------------------------------
 // AMF stamps plain baseline; Chrome answers that with a rejected m-line and gathers no candidates.
@@ -146,4 +183,4 @@ assert.ok(spawned.options.env.PATH.startsWith('D:\\gst\\bin;'), 'the install dir
 assert.ok(spawned.options.env.PATH.includes('C:\\windows'), 'and the rest of PATH must survive')
 assert.equal(spawned.options.windowsHide, true, 'no console window may flash over a live broadcast')
 
-console.log('PASS: per-user install discovery, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback.')
+console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback.')

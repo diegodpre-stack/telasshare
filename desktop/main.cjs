@@ -20,6 +20,10 @@ const { findGstreamer } = require('./nativeCapture.cjs')
 const { createNativeBroadcast } = require('./nativeBroadcast.cjs')
 const mediaPolicy = mediaFeaturePolicy()
 const mediaRuntime = createMediaRuntimeLog(mediaPolicy)
+// GStreamer writes a cache of every plugin it finds. Beside a bundled copy under Program Files it
+// cannot write at all, and without the cache it rescans hundreds of plugins on every launch of the
+// pipeline. userData is the one directory guaranteed to be writable.
+process.env.ENTRETELAS_GST_REGISTRY = path.join(app.getPath('userData'), 'gstreamer-registry.bin')
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default')
 if (mediaPolicy.enabledFeatures.length) app.commandLine.appendSwitch('enable-features', mediaPolicy.enabledFeatures.join(','))
 if (mediaPolicy.disabledFeatures.length) app.commandLine.appendSwitch('disable-features', mediaPolicy.disabledFeatures.join(','))

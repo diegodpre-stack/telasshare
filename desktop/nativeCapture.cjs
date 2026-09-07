@@ -13,19 +13,44 @@ const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 
+// The bundled copy comes first, so a packaged app never depends on what the machine happens to have.
+// An explicit override still wins over both, for testing against a different build.
+//
 // Per-user is where the MSVC installer actually puts it; the machine-wide paths are what the docs show.
-const GSTREAMER_CANDIDATES = (env) => [
+// Both stay as a fallback for running from source, where nothing has been bundled yet.
+const GSTREAMER_CANDIDATES = (env, resourcesPath) => [
   env.ENTRETELAS_GSTREAMER_DIR,
+  resourcesPath && path.join(resourcesPath, 'gstreamer', 'bin'),
   env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Programs', 'gstreamer', '1.0', 'msvc_x86_64', 'bin'),
   env.GSTREAMER_1_0_ROOT_MSVC_X86_64 && path.join(env.GSTREAMER_1_0_ROOT_MSVC_X86_64, 'bin'),
   'C:\\gstreamer\\1.0\\msvc_x86_64\\bin',
 ].filter(Boolean)
 
-function findGstreamer(env = process.env, exists = fs.existsSync) {
-  for (const dir of GSTREAMER_CANDIDATES(env)) {
+function findGstreamer(env = process.env, exists = fs.existsSync, resourcesPath = process.resourcesPath) {
+  for (const dir of GSTREAMER_CANDIDATES(env, resourcesPath)) {
     if (exists(path.join(dir, 'gst-launch-1.0.exe'))) return dir
   }
   return null
+}
+
+// A machine with its own GStreamer installed also has GST_* variables pointing at it, and inheriting
+// those loads our plugins against someone else's core libraries -- the one failure here that is a real
+// crash rather than a quiet fallback. So the child is given our paths and none of theirs.
+//
+// GST_PLUGIN_SYSTEM_PATH is set empty rather than removed: empty means "look nowhere else", while absent
+// means "look in the built-in default", which is exactly the other installation.
+function pipelineEnv(env, bin) {
+  const clean = { ...env }
+  for (const key of Object.keys(clean)) if (key.startsWith('GST_')) delete clean[key]
+  return {
+    ...clean,
+    PATH: `${bin};${env.PATH || ''}`,
+    GST_PLUGIN_PATH: path.join(path.dirname(bin), 'lib', 'gstreamer-1.0'),
+    GST_PLUGIN_SYSTEM_PATH: '',
+    // The plugin cache has to live somewhere writable, or every launch rescans hundreds of plugins --
+    // and under Program Files it cannot be written at all.
+    ...(env.ENTRETELAS_GST_REGISTRY ? { GST_REGISTRY: env.ENTRETELAS_GST_REGISTRY } : {}),
+  }
 }
 
 // Chrome only receives H.264 it recognises as constrained baseline -- profile_idc 0x42 with the
@@ -137,10 +162,10 @@ function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exist
   const child = spawnFn(path.join(bin, 'gst-launch-1.0.exe'), args, {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
-    // The plugin scanner needs the install's own directory on PATH or it silently finds no elements.
-    env: { ...env, PATH: `${bin};${env.PATH || ''}` },
+    // The plugin scanner needs this install's own directory on PATH or it silently finds no elements.
+    env: pipelineEnv(env, bin),
   })
   return child
 }
 
-module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback }
+module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv }

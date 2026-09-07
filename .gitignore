@@ -6,3 +6,4 @@ release
 *.key
 *.crt
 .DS_Store
+native/gstreamer/

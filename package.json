@@ -57,17 +57,25 @@
       {
         "from": "native/bin/process-audio-capture.exe",
         "to": "native/process-audio-capture.exe"
+      },
+      {
+        "from": "native/gstreamer",
+        "to": "gstreamer"
       }
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

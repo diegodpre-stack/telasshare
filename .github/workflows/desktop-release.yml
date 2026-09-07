@@ -45,17 +45,20 @@ jobs:
             exit $LASTEXITCODE
           }
       # The app must work on a machine that has never heard of GStreamer, so the runtime ships inside it.
-      # INSTALLLEVEL=1000 selects every feature: the default install omits plugins, and a missing plugin
-      # is not an error but a silently absent element.
+      # The published installer is Inno Setup, not an MSI -- the .msi URL does not exist at all, which is
+      # what the first attempt at this step discovered the hard way.
       - name: Install GStreamer runtime
         shell: pwsh
         run: |
           $version = '1.28.6'
-          $msi = "$env:RUNNER_TEMP\gstreamer.msi"
-          Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc/gstreamer-1.0-msvc-x86_64-$version.msi" -OutFile $msi
-          $log = "$env:RUNNER_TEMP\gstreamer-install.log"
-          $process = Start-Process msiexec -ArgumentList '/i', "`"$msi`"", '/quiet', '/qn', 'INSTALLLEVEL=1000', '/l*v', "`"$log`"" -Wait -PassThru
-          if ($process.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "GStreamer install failed ($($process.ExitCode))" }
+          $sha256 = '059251444D1267B486EBA390B18D25FED87E10315E72F757EC6C7E912FA746B5'
+          $installer = "$env:RUNNER_TEMP\gstreamer.exe"
+          Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc/gstreamer-1.0-msvc-x86_64-$version.exe" -OutFile $installer
+          # This runtime is shipped to everyone who installs the app, so what goes in is checked first.
+          $actual = (Get-FileHash $installer -Algorithm SHA256).Hash
+          if ($actual -ne $sha256) { throw "GStreamer download does not match the expected hash: $actual" }
+          $process = Start-Process $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "GStreamer install failed ($($process.ExitCode))" }
 
       - name: Bundle GStreamer into the app
         shell: pwsh

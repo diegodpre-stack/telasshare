@@ -64,5 +64,40 @@ for (const entry of await readdir(pluginsFrom, { withFileTypes: true })) {
   }
 }
 
+// A partial install produces a bundle that looks fine and fails on the user's machine, because a missing
+// plugin is not an error -- the element is simply "not found" and native capture disappears. So the
+// build breaks here instead, where somebody is watching. These are the plugins the pipeline cannot run
+// without, plus the encoders for the GPUs other people have.
+const required = {
+  'gstd3d11.dll': 'screen capture and GPU colour conversion',
+  'gstwebrtchttp.dll': 'whipsink',
+  'gstwebrtc.dll': 'webrtcbin',
+  'gstnice.dll': 'ICE',
+  'gstdtls.dll': 'DTLS',
+  'gstsrtp.dll': 'SRTP',
+  'gstrtp.dll': 'RTP payloaders',
+  'gstrtpmanager.dll': 'RTP session handling',
+  'gstvideoparsersbad.dll': 'h264parse',
+  'gstcoreelements.dll': 'queue and tee',
+  'gstopus.dll': 'Opus',
+  'gstaudioconvert.dll': 'audio conversion',
+  'gstaudioresample.dll': 'audio resampling',
+  'gstwasapi2.dll': 'system sound',
+  'gstamfcodec.dll': 'AMD encoder',
+  'gstnvcodec.dll': 'NVIDIA encoder',
+  'gstqsv.dll': 'Intel encoder',
+  'gstmediafoundation.dll': 'encoder fallback',
+}
+const missing = Object.entries(required)
+  .filter(([file]) => !existsSync(path.join(target, 'lib', 'gstreamer-1.0', file)))
+  .map(([file, purpose]) => `  ${file} (${purpose})`)
+if (missing.length) {
+  console.error('The bundle is incomplete. Missing:')
+  for (const line of missing) console.error(line)
+  console.error('\nThe GStreamer install is probably partial; a complete one is needed.')
+  process.exit(1)
+}
+
 console.log(`GStreamer bundled from ${source}`)
 console.log(`  ${(await megabytes(target) / 1024 / 1024).toFixed(0)} MB into native/gstreamer`)
+console.log(`  ${Object.keys(required).length} required plugins present`)

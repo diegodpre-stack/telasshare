@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MediaDiagnostics from './MediaDiagnostics.jsx'
 
 // Off unless asked for. While mounted the panel polls getStats on every connection every two seconds,
@@ -23,7 +23,7 @@ import { createVoiceChat, isVoiceConnection } from './voiceChat.js'
 import { createVoiceMixer, DEFAULT_VOLUME, MAX_VOLUME } from './voiceMixer.js'
 import { createVoiceInput, MAX_THRESHOLD_DB, MIN_THRESHOLD_DB } from './voiceInput.js'
 import { splitLinks } from './chatLinks.js'
-import { createPanelLayout } from './panelLayout.js'
+import { createPanelLayout, dropRegion } from './panelLayout.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, HeadphoneOff, Headphones, KeyRound, LogOut, MessageSquare, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Plus, Radio, RotateCcw, Send, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -410,12 +410,14 @@ export default function App() {
   useEffect(() => { broadcastingRef.current = broadcasting }, [broadcasting])
   const [showPeople, setShowPeople] = useState(true)
   const [showChat, setShowChat] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   // The arrangement lives in the module, which owns the clamping and the persistence. Nothing here reads
   // the counter -- it exists only to redraw when the module says the order changed.
   const [, redrawLayout] = useState(0)
   const layoutRef = useRef(null)
   if (!layoutRef.current) layoutRef.current = createPanelLayout({ onChange: () => redrawLayout((current) => current + 1) })
   const [dragging, setDragging] = useState(null)
+  const [dropAt, setDropAt] = useState(null)
   const [messages, setMessages] = useState([])
   const [chatDraft, setChatDraft] = useState('')
   const [unreadChat, setUnreadChat] = useState(0)
@@ -502,14 +504,15 @@ export default function App() {
         const existing = observersRef.current.get(id)
         if (existing) { existing.observer.disconnect(); observersRef.current.delete(id) }
         if (!node) return
+        // Height only: the width belongs to the column, since everything stacked in one has to be as
+        // wide as the column is.
         const size = layoutRef.current.sizeOf(id)
-        if (size.width) node.style.width = `${size.width}px`
         if (size.height) node.style.height = `${size.height}px`
         if (typeof ResizeObserver === 'undefined') return
         // Fires on every pixel of a drag. The module ignores a size it already has, so the write and the
         // redraw only happen when the number actually changed.
         const observer = new ResizeObserver(() => {
-          if (node.isConnected) layoutRef.current.resize(id, { width: node.offsetWidth, height: node.offsetHeight })
+          if (node.isConnected) layoutRef.current.resize(id, { height: node.offsetHeight })
         })
         observer.observe(node)
         observersRef.current.set(id, { node, observer })
@@ -517,17 +520,51 @@ export default function App() {
     }
     return panelRefsRef.current.get(id)
   }
+  // The column carries the width, taken from whichever panel leads it. Dragging the column sideways is
+  // what widens everything stacked inside, which is the only arrangement that makes sense once panels
+  // can sit on top of one another.
+  const columnRefsRef = useRef(new Map())
+  const columnRef = (leadId) => {
+    if (!columnRefsRef.current.has(leadId)) {
+      columnRefsRef.current.set(leadId, (node) => {
+        const existing = observersRef.current.get(`column:${leadId}`)
+        if (existing) { existing.observer.disconnect(); observersRef.current.delete(`column:${leadId}`) }
+        if (!node) return
+        const size = layoutRef.current.sizeOf(leadId)
+        if (size.width) node.style.width = `${size.width}px`
+        if (typeof ResizeObserver === 'undefined') return
+        const observer = new ResizeObserver(() => {
+          if (node.isConnected) layoutRef.current.resize(leadId, { width: node.offsetWidth })
+        })
+        observer.observe(node)
+        observersRef.current.set(`column:${leadId}`, { node, observer })
+      })
+    }
+    return columnRefsRef.current.get(leadId)
+  }
+
   // Returned in two halves so nothing meant for the handle ends up as an attribute on the panel.
   const panelProps = (id, baseClass) => ({
     box: {
       ref: panelRef(id),
-      className: `panel ${baseClass} resizable${dragging && dragging !== id ? ' drop-target' : ''}${dragging === id ? ' dragging' : ''}`,
-      style: { order: layoutRef.current.indexOf(id) },
-      onDragOver: (event) => { if (dragging && dragging !== id) event.preventDefault() },
+      className: `panel ${baseClass}${layoutRef.current.leads(id) ? ' leads' : ''}${dragging && dragging !== id ? ' drop-target' : ''}${dragging === id ? ' dragging' : ''}${dropAt?.id === id ? ` drop-${dropAt.where}` : ''}`,
+        onDragOver: (event) => {
+        if (!dragging || dragging === id) return
+        event.preventDefault()
+        // Which part of the panel the pointer is over decides what the drop means: the middle stacks
+        // above or below, the narrow sides open a column of their own.
+        const where = dropRegion(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY)
+        setDropAt((current) => (current?.id === id && current.where === where ? current : { id, where }))
+      },
+      onDragLeave: (event) => {
+        // Only when the pointer has actually left, not when it crosses something inside.
+        if (!event.currentTarget.contains(event.relatedTarget)) setDropAt((current) => (current?.id === id ? null : current))
+      },
       onDrop: (event) => {
         event.preventDefault()
-        if (dragging && dragging !== id) layoutRef.current.move(dragging, id)
-        setDragging(null)
+        const where = dropRegion(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY)
+        if (dragging && dragging !== id) layoutRef.current.place(dragging, id, where)
+        setDragging(null); setDropAt(null)
       },
     },
     // The heading is the handle: making the whole panel draggable would mean no text inside it could be
@@ -535,7 +572,7 @@ export default function App() {
     grip: {
       draggable: true,
       onDragStart: (event) => { setDragging(id); event.dataTransfer.effectAllowed = 'move' },
-      onDragEnd: () => setDragging(null),
+      onDragEnd: () => { setDragging(null); setDropAt(null) },
       title: 'Arraste para reordenar',
     },
   })
@@ -1375,6 +1412,19 @@ export default function App() {
   const stagePanel = panelProps('stage', 'stage multi-stage')
   const chatPanel = panelProps('chat', 'chat')
   const settingsPanel = panelProps('settings', 'settings')
+  // A column is drawn only if something in it is on screen, so closing a panel takes its column's gap
+  // with it rather than leaving a hole in the row.
+  const panelIsOpen = { people: showPeople, stage: true, chat: showChat, settings: showSettings }
+  const visibleColumns = layoutRef.current.columns
+    .map((column) => column.filter((id) => panelIsOpen[id]))
+    .filter((column) => column.length)
+
+  const panelById = {
+    people: <section {...peoplePanel.box}><div {...peoplePanel.grip} className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}{user.voice ? ' · no áudio' : ''}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div>{voiceJoined && user.voice && user.id !== selfId && <div className="person-voice"><span className={`voice-meter small${voiceDeafened || voiceVolumes[user.name] === 0 ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.peers?.[user.name] || 0)})` }} /></span><input type="range" min="0" max={MAX_VOLUME} step="5" value={voiceVolumes[user.name] ?? DEFAULT_VOLUME} onChange={(event) => setPeerVolume(user.name, event.target.value)} aria-label={`Volume de ${user.name} para você`} /><b>{voiceVolumes[user.name] ?? DEFAULT_VOLUME}%</b></div>}</article>)}</div></section>,
+    stage: <section {...stagePanel.box}><div {...stagePanel.grip} className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>,
+    chat: <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} panel={chatPanel} />,
+    settings: <aside {...settingsPanel.box}><div {...settingsPanel.grip} className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented"><button type="button" className={fps === 30 ? 'selected' : ''} onClick={() => setFps(30)}>30</button><button type="button" className={fps === 60 ? 'selected' : ''} onClick={() => setFps(60)}>60</button></div><p className="hint">É uma preferência. O navegador, a tela e a GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p></fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>,
+  }
 
   if (!siteSession) return <main className="shell login-shell"><section className="login-card"><div className="brand-mark"><MonitorUp size={28} /></div><p className="eyebrow">TelasShare</p><h1>Entre para encontrar seus amigos.</h1><p className="intro">Usuários comuns precisam apenas escolher um nome. As salas continuam protegidas por suas próprias senhas.</p><form className="login-form" onSubmit={loginSite}><label htmlFor="name">Seu nome de usuário</label><input id="name" value={name} onChange={(event) => setName(event.target.value)} maxLength={32} placeholder="Ex.: Diego" autoFocus />{adminMode && <><label htmlFor="password">Senha administrativa</label><input id="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} maxLength={128} placeholder="Senha de ADM" autoComplete="current-password" autoFocus /></>}<button type="submit" disabled={joining}>{joining ? 'Entrando…' : adminMode ? 'Entrar como ADM' : 'Entrar no TelasShare'}</button><button type="button" className="admin-login-toggle" onClick={() => { setAdminMode((current) => !current); setPassword(''); setAccessError('') }}>{adminMode ? 'Voltar para usuário comum' : 'ADM'}</button>{accessError && <p className="access-error" role="alert">{accessError}</p>}</form><div className="login-links"><div className="trust-line"><ShieldCheck size={17} /><span>Dentro de uma sala, somente os participantes veem quem está presente.</span></div></div></section><BuildStamp /><GlobalActions /></main>
 
@@ -1390,15 +1440,11 @@ export default function App() {
     <section className="voice-bar" aria-label="Áudio da sala">{!voiceJoined
       ? <button type="button" className="voice-join" onClick={joinVoice}><PhoneCall size={17} /><span><strong>Entrar no áudio</strong><small>{users.filter((user) => user.voice).length ? `${users.filter((user) => user.voice).length} na conversa agora` : 'ninguém na conversa ainda'}</small></span></button>
       : <><div className="voice-self"><span className={`voice-meter input${voiceMuted ? ' silent' : voiceLevels.open ? ' open' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.self || 0)})` }} /><b style={{ left: `${Math.round((voiceLevels.thresholdLevel || 0) * 100)}%` }} /></span><div><strong>Você está no áudio</strong><small>{voiceMuted ? 'microfone desligado' : voiceStatus}</small></div></div><div className="voice-actions"><button type="button" className={voiceMuted ? 'off' : ''} onClick={toggleMute} aria-pressed={voiceMuted}>{voiceMuted ? <MicOff size={16} /> : <Mic size={16} />}{voiceMuted ? 'Microfone desligado' : 'Microfone ligado'}</button><button type="button" className={voiceDeafened ? 'off' : ''} onClick={toggleDeafen} aria-pressed={voiceDeafened}>{voiceDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}{voiceDeafened ? 'Não está ouvindo' : 'Ouvindo todos'}</button><button type="button" className="leave-voice" onClick={() => leaveVoice(true)}><PhoneOff size={16} />Sair do áudio</button></div><div className="voice-sensitivity"><label className="voice-auto"><input type="checkbox" checked={voiceSensitivity.auto} onChange={(event) => setVoiceAuto(event.target.checked)} />Ajustar a sensibilidade automaticamente</label><label className="voice-auto"><input type="checkbox" checked={voiceSensitivity.suppression} onChange={(event) => setVoiceSuppression(event.target.checked)} />Supressão de ruído{voiceSensitivity.suppression && !voiceSensitivity.suppressionReady ? ' · carregando' : ''}</label><input type="range" min={MIN_THRESHOLD_DB} max={MAX_THRESHOLD_DB} step="1" value={voiceSensitivity.auto ? Math.round(voiceLevels.thresholdDb || MIN_THRESHOLD_DB) : voiceSensitivity.manualDb} disabled={voiceSensitivity.auto} onChange={(event) => setVoiceThreshold(event.target.value)} aria-label="Sensibilidade do microfone" /><span>{voiceSensitivity.auto ? `${Math.round(voiceLevels.thresholdDb || 0)} dB · automático` : `${voiceSensitivity.manualDb} dB`}</span><p className="hint">Abaixo desse nível nada é enviado — é o que segura teclado e batida na mesa enquanto você não está falando. Fale normalmente e veja onde a barra chega. A supressão de ruído limpa o que passa: ótima com ventoinha, ar-condicionado e chiado, parcial com estalo seco de tecla.</p></div></>}</section>
-    <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
     <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>
     {nativeAvailable && <label className="size-control">Captura da sua tela<select value={nativeWanted ? 'nativa' : 'navegador'} onChange={(event) => setNativeWanted(event.target.value === 'nativa')} disabled={isBroadcasting}><option value="navegador">Navegador (padrão)</option><option value="nativa">Nativa — experimental</option></select><span>{isBroadcasting ? 'Não muda uma transmissão já iniciada.' : 'A nativa mantém o quadro na placa de vídeo e sustenta 60 FPS em 1440p. O som é o do sistema inteiro, sem o do próprio TelasShare.'}</span></label>}
-    <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><button type="button" className={`people-toggle${showChat ? ' active' : ''}`} onClick={() => setShowChat((current) => !current)} aria-expanded={showChat}><MessageSquare size={16} /><span>{showChat ? 'Fechar conversa' : 'Conversa'}</span>{!showChat && unreadChat > 0 && <b className="chat-badge">{unreadChat > 99 ? '99+' : unreadChat}</b>}</button><label className="quality-toggle" htmlFor="quality-toggle"><SlidersHorizontal size={16} /><span>Configurar transmissão</span></label>{layoutRef.current.customised && <button type="button" className="people-toggle layout-reset" onClick={resetLayout} title="Voltar ao tamanho e à ordem originais"><RotateCcw size={15} /><span>Restaurar layout</span></button>}</div>
-    <div className="workspace panels" onDragEnd={() => setDragging(null)}>
-      {showPeople && <section {...peoplePanel.box}><div {...peoplePanel.grip} className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}{user.voice ? ' · no áudio' : ''}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div>{voiceJoined && user.voice && user.id !== selfId && <div className="person-voice"><span className={`voice-meter small${voiceDeafened || voiceVolumes[user.name] === 0 ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.peers?.[user.name] || 0)})` }} /></span><input type="range" min="0" max={MAX_VOLUME} step="5" value={voiceVolumes[user.name] ?? DEFAULT_VOLUME} onChange={(event) => setPeerVolume(user.name, event.target.value)} aria-label={`Volume de ${user.name} para você`} /><b>{voiceVolumes[user.name] ?? DEFAULT_VOLUME}%</b></div>}</article>)}</div></section>}
-      <section {...stagePanel.box}><div {...stagePanel.grip} className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>
-      {showChat && <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} panel={chatPanel} />}
-      <aside {...settingsPanel.box}><div {...settingsPanel.grip} className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented"><button type="button" className={fps === 30 ? 'selected' : ''} onClick={() => setFps(30)}>30</button><button type="button" className={fps === 60 ? 'selected' : ''} onClick={() => setFps(60)}>60</button></div><p className="hint">É uma preferência. O navegador, a tela e a GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p></fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
+    <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><button type="button" className={`people-toggle${showChat ? ' active' : ''}`} onClick={() => setShowChat((current) => !current)} aria-expanded={showChat}><MessageSquare size={16} /><span>{showChat ? 'Fechar conversa' : 'Conversa'}</span>{!showChat && unreadChat > 0 && <b className="chat-badge">{unreadChat > 99 ? '99+' : unreadChat}</b>}</button><button type="button" className={`people-toggle${showSettings ? ' active' : ''}`} onClick={() => setShowSettings((current) => !current)} aria-expanded={showSettings}><SlidersHorizontal size={16} /><span>{showSettings ? 'Fechar qualidade' : 'Configurar transmissão'}</span></button>{layoutRef.current.customised && <button type="button" className="people-toggle layout-reset" onClick={resetLayout} title="Voltar ao tamanho e à ordem originais"><RotateCcw size={15} /><span>Restaurar layout</span></button>}</div>
+    <div className="workspace panels" onDragEnd={() => { setDragging(null); setDropAt(null) }}>
+      {visibleColumns.map((column) => <div className="panel-column" key={column.join('-')} ref={columnRef(column[0])}>{column.map((id) => <Fragment key={id}>{panelById[id]}</Fragment>)}</div>)}
     </div>
   </main>
 }

@@ -13,8 +13,8 @@
 .screen-audio button{display:flex;align-items:center;justify-content:center;width:29px;height:29px;flex:0 0 auto;border:1px solid #ffffff1f;background:#ffffff0d;color:inherit;border-radius:9px;cursor:pointer}
 .screen-audio button:hover{background:#ffffff1a}
 .login-links{display:grid;gap:14px;margin-top:25px}.login-links .trust-line{margin-top:0}.friend-site-button{display:flex;align-items:center;justify-content:center;gap:7px;border:1px solid #30465b;background:#112235;color:#a9bdcf;border-radius:10px;padding:10px 13px;font-size:11px;font-weight:700}.friend-site-button:hover{border-color:#4c718f;color:#e3eef7;background:#162b40}.login-links>.friend-site-button{width:100%}.external-site-modal .modal-actions button{width:100%}
-.quality-toggle-check{position:absolute;opacity:0;pointer-events:none}.panel-toggles{display:flex;justify-content:flex-end;gap:9px;margin:0 0 14px}.quality-toggle,.people-toggle{width:max-content;margin:0;display:flex;align-items:center;gap:7px;padding:10px 13px;border:1px solid #30465b;background:#112235;color:#a9bdcf;border-radius:10px;font-size:11px;font-weight:700;cursor:pointer}.quality-toggle:hover,.people-toggle:hover{border-color:#49cda8;color:#dff9f1}.quality-toggle-check:focus-visible~.panel-toggles .quality-toggle{outline:2px solid #49cda8;outline-offset:2px}.quality-toggle-check:checked~.panel-toggles .quality-toggle,.people-toggle.active{background:#163c34;border-color:#31745f;color:#8ce8cc}.quality-toggle-check:checked~.panel-toggles .quality-toggle span::after{content:' · fechar'}.screens-grid{display:flex;flex-wrap:wrap;align-content:flex-start}.screen-card{position:relative;display:flex;flex-direction:column;flex:0 0 auto;resize:both;overflow:hidden;min-width:260px;min-height:210px;max-width:100%}.screen-card::after{content:'';position:absolute;right:3px;bottom:3px;width:11px;height:11px;border-right:2px solid #65dbb9;border-bottom:2px solid #65dbb9;pointer-events:none;opacity:.8}.screen-card.size-small{width:min(310px,100%);height:235px}.screen-card.size-medium{width:min(540px,100%);height:365px}.screen-card.size-large{width:100%;height:min(70vh,720px)}.screen-card-head,.screen-audio{flex:0 0 auto}.screen-card .remote-frame{flex:1 1 auto;aspect-ratio:auto;min-height:120px}.multi-empty{width:100%}
-@media(max-width:760px){.panel-toggles{display:grid;grid-template-columns:1fr 1fr}.quality-toggle,.people-toggle{width:100%;justify-content:center}.screen-card,.screen-card.size-small,.screen-card.size-medium,.screen-card.size-large{width:100%;height:auto;min-width:0;min-height:0;resize:none}.screen-card::after{display:none}.screen-card .remote-frame{flex:none;aspect-ratio:16/9}}
+.panel-toggles{display:flex;justify-content:flex-end;gap:9px;margin:0 0 14px}.people-toggle{width:max-content;margin:0;display:flex;align-items:center;gap:7px;padding:10px 13px;border:1px solid #30465b;background:#112235;color:#a9bdcf;border-radius:10px;font-size:11px;font-weight:700;cursor:pointer}.quality-toggle:hover,.people-toggle:hover{border-color:#49cda8;color:#dff9f1}.screens-grid{display:flex;flex-wrap:wrap;align-content:flex-start}.screen-card{position:relative;display:flex;flex-direction:column;flex:0 0 auto;resize:both;overflow:hidden;min-width:260px;min-height:210px;max-width:100%}.screen-card::after{content:'';position:absolute;right:3px;bottom:3px;width:11px;height:11px;border-right:2px solid #65dbb9;border-bottom:2px solid #65dbb9;pointer-events:none;opacity:.8}.screen-card.size-small{width:min(310px,100%);height:235px}.screen-card.size-medium{width:min(540px,100%);height:365px}.screen-card.size-large{width:100%;height:min(70vh,720px)}.screen-card-head,.screen-audio{flex:0 0 auto}.screen-card .remote-frame{flex:1 1 auto;aspect-ratio:auto;min-height:120px}.multi-empty{width:100%}
+@media(max-width:760px){.panel-toggles{display:grid;grid-template-columns:1fr 1fr}.people-toggle{width:100%;justify-content:center}.screen-card,.screen-card.size-small,.screen-card.size-medium,.screen-card.size-large{width:100%;height:auto;min-width:0;min-height:0;resize:none}.screen-card::after{display:none}.screen-card .remote-frame{flex:none;aspect-ratio:16/9}}
 .live-actions{display:flex;gap:8px;flex:0 0 auto}.live-banner .preview-button{background:#174b3d!important;border-color:#3a826e!important;color:#c8f6e8!important}.self-preview-modal{width:min(1100px,96vw);max-height:94vh;display:flex;flex-direction:column;background:#07111b;border:1px solid #294158;border-radius:16px;overflow:hidden;box-shadow:0 30px 90px #000}.self-preview-video{min-height:240px;aspect-ratio:16/9;background:#02060a;display:grid;place-items:center}.self-preview-video video{width:100%;height:100%;display:block;object-fit:contain}.self-preview-video:fullscreen{width:100vw;height:100vh;background:#000}.self-preview-modal>p{margin:0;padding:11px 14px;color:#8297aa;background:#0e1c2b;border-top:1px solid #203247;font-size:10px;text-align:center}.self-preview-modal .screen-card-head{flex:0 0 auto}.self-preview-modal .screen-card-head button{cursor:pointer}
 @media(max-width:720px){.live-banner{flex-direction:column}.live-actions{width:100%;display:grid;grid-template-columns:1fr}.live-actions button{width:100%}.self-preview-video{min-height:0}.self-preview-modal .screen-card-head span{display:none}}
 .app-download{position:fixed;z-index:12;right:18px;bottom:18px;display:grid;grid-template-columns:34px auto;column-gap:9px;align-items:center;padding:10px 14px;border:1px solid #3b7868;background:#102e28ed;color:#dff9f1;border-radius:13px;text-decoration:none;box-shadow:0 14px 45px #0008;backdrop-filter:blur(10px)}.app-download>span{grid-row:1/3;width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:#49e0b4;color:#06261c;font-size:22px;font-weight:900}.app-download strong{font-size:11px}.app-download small{font-size:9px;color:#7fb6a7}.app-download:hover{transform:translateY(-2px);border-color:#59d8b5;background:#133b32}html[data-desktop=true] .app-download{display:none}@media(max-width:600px){.app-download{right:12px;bottom:12px;padding:9px 11px}}
@@ -121,17 +121,18 @@
 .chat-compose button:disabled{opacity:.4}
 .chat-badge{margin-left:6px;background:#ff6871;color:#2a0d10;border-radius:9px;padding:1px 6px;font-size:9px;font-weight:800}
 
-/* Panels the person using them arranges: a flex row rather than a fixed grid, each panel carrying its
-   own size, and the order coming from the layout module. The stage takes whatever is left, so the
-   others are sized against the picture instead of the picture being squeezed by arithmetic. */
+/* Panels the person using them arranges. A row of columns, each column a stack: a single row could
+   only ever put things side by side, so a narrow panel next to a tall one wasted the whole height
+   beside it. The column carries the width, since everything stacked in it has to share one. */
 .workspace.panels{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px}
-.panel.resizable{flex:0 0 auto;overflow:hidden;resize:both;min-width:200px;max-width:680px}
-.panel.people{width:300px;height:560px}
-.panel.chat{width:340px;height:560px;max-height:none}
-.panel.settings{width:300px}
-/* The stage cannot be resized sideways: it is what the others leave behind, so a width here would only
-   fight them. Height is still its own. */
-.panel.stage{flex:1 1 460px;min-width:360px;max-width:none;resize:vertical;height:620px}
+.panel-column{display:flex;flex-direction:column;gap:14px;flex:0 0 auto;width:300px;min-width:200px;max-width:900px;overflow:hidden;resize:horizontal}
+/* The column holding the picture takes what the others leave rather than a width of its own. */
+.panel-column:has(>.panel.stage){flex:1 1 460px;width:auto;min-width:360px;max-width:none;resize:none}
+.panel.resizable{width:auto;overflow:hidden;resize:vertical;min-height:160px}
+.panel.people{height:460px}
+.panel.chat{height:520px;max-height:none}
+.panel.stage{height:620px}
+.panel.settings{height:auto;resize:vertical}
 .panel.people,.panel.chat{display:flex;flex-direction:column}
 .panel.people .people-list{flex:1;overflow-y:auto}
 .panel.stage .screens-grid{overflow-y:auto}
@@ -141,6 +142,14 @@
 .panel-heading[draggable=true]:active{cursor:grabbing}
 .panel.dragging{opacity:.45}
 .panel.drop-target{outline:1px dashed #2f6f5d;outline-offset:-1px}
+/* Where it would land, drawn on the edge it would land against, so the drop is decided by looking
+   rather than by trying. */
+.panel.drop-above,.panel.drop-below,.panel.drop-left,.panel.drop-right{position:relative}
+.panel.drop-above::before,.panel.drop-below::before,.panel.drop-left::before,.panel.drop-right::before{content:'';position:absolute;z-index:3;background:var(--accent);box-shadow:0 0 14px #49e0b4aa;border-radius:3px;pointer-events:none}
+.panel.drop-above::before{left:0;right:0;top:0;height:4px}
+.panel.drop-below::before{left:0;right:0;bottom:0;height:4px}
+.panel.drop-left::before{top:0;bottom:0;left:0;width:4px}
+.panel.drop-right::before{top:0;bottom:0;right:0;width:4px}
 .layout-reset{margin-left:auto}
 
 /* The two shortcuts used to float over the bottom-right corner of whatever was on screen. In the header
@@ -153,18 +162,19 @@
 .chat-count{align-self:center;font-size:9px;font-weight:700;color:#5d7286;min-width:50px;text-align:right}
 .chat-count.full{color:#ff9299}
 
-/* On a small screen nobody is arranging anything: the stored sizes are set as inline styles, so undoing
-   them here has to be explicit. */
+/* On a small screen nobody is arranging anything: the sizes are set as inline styles, so undoing them
+   here has to be explicit. */
 @media(max-width:900px){
   .workspace.panels{display:block}
-  .panel.resizable{width:auto!important;height:auto!important;min-width:0;max-width:none;resize:none;margin-bottom:14px}
+  .panel-column{width:auto!important;min-width:0;max-width:none;resize:none;display:block}
+  .panel.resizable{width:auto!important;height:auto!important;min-width:0;min-height:0;max-width:none;resize:none;margin-bottom:14px}
   .global-actions.inline .app-download-button strong{font-size:0}
 }
 
 /* The settings panel is shown by its toggle and by nothing else. This used to be spread across half a
    dozen rules written against the old grid, every one of which stopped matching when the workspace
    became a row of panels -- so the toggle quietly stopped hiding anything at all. */
-.quality-toggle-check:not(:checked)~.workspace .settings{display:none}
+
 
 /* The rows above the workspace sat flush against one another, so the two dropdowns and the toggles
    under them read as one clipped block. */

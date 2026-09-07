@@ -89,6 +89,16 @@ function createNativeBroadcast({
         onError?.(connectionId, 'gstreamer-missing')
         return false
       }
+      // gst-launch writes the reason it failed to stderr and then exits. Discarding that left every
+      // pipeline failure looking identical from the outside -- a viewer that simply never sees a screen.
+      let complaint = ''
+      child.stderr?.on('data', (chunk) => {
+        complaint = (complaint + chunk.toString()).slice(-4000)
+      })
+      const failureReason = () => {
+        const line = complaint.split(String.fromCharCode(10)).find((entry) => /ERROR|erroneous pipeline|no element/i.test(entry))
+        return line ? line.trim().slice(0, 300) : null
+      }
       const firstFrame = setTimeout(() => {
         if (!viewers.has(connectionId)) return
         onError?.(connectionId, 'no-frames')
@@ -96,8 +106,12 @@ function createNativeBroadcast({
       }, firstFrameTimeoutMs)
       firstFrame.unref?.()
       viewers.set(connectionId, { sessionId: id, child, firstFrame })
-      // A pipeline that dies takes its viewer with it; the app should hear about that once.
-      child.once?.('exit', () => { if (viewers.get(connectionId)?.child === child) dropViewer(connectionId, true) })
+      // A pipeline that dies takes its viewer with it; the app should hear about that once, and hear why.
+      child.once?.('exit', (code) => {
+        if (viewers.get(connectionId)?.child !== child) return
+        if (code) onError?.(connectionId, failureReason() || 'pipeline-failed')
+        dropViewer(connectionId, true)
+      })
       return true
     },
 

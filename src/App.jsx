@@ -416,7 +416,11 @@ export default function App() {
         ? 'A captura nativa não está disponível nesta máquina. Desligue a opção para transmitir pelo navegador.'
         : reason === 'no-frames'
           ? 'A fonte escolhida não produziu imagem. Uma janela precisa estar visível para ser capturada — minimizada, coberta ou em tela cheia exclusiva ela não gera quadros. Tente a tela inteira.'
-          : 'Um espectador não pôde ser conectado pela captura nativa.'),
+          : reason === 'pipeline-failed'
+            ? 'A captura nativa falhou ao iniciar. Desligue a opção para transmitir pelo navegador.'
+            // Anything else is the pipeline's own words, which name the fault far better than a generic
+            // message can -- a missing element, a busy encoder, a source that vanished.
+            : `A captura nativa falhou: ${reason}`),
     })
     nativeRef.current = native
     return () => { native.dispose(); nativeRef.current = null }

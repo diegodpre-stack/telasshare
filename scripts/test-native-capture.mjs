@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv } =
+const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, VIDEO_ENCODERS } =
   createRequire(import.meta.url)('../desktop/nativeCapture.cjs')
 
 // --- finding the install -------------------------------------------------
@@ -111,6 +111,40 @@ for (const bad of [0, -1, null, 'abc', 1.5]) {
   assert.ok(args.includes('monitor-index=1') && !args.includes('window-handle'), `bad handle ${bad} must not be used`)
 }
 
+// --- whichever encoder this machine has -----------------------------------
+// The pipeline used to name amfh264enc outright, so on anything but an AMD card gst-launch was handed an
+// element that does not exist and died at once: no offer, no preview, and a viewer waiting for a screen
+// that was never coming. Everyone here does not have the same graphics card.
+const encoderFor = (...available) => {
+  const found = VIDEO_ENCODERS.find(({ element }) => available.includes(element))
+  return found ? buildPipelineArgs({ endpoint: 'http://x/whip', encoder: found, bitrateKbps: 9000 }).join(' ') : null
+}
+assert.ok(encoderFor('amfh264enc', 'nvd3d11h264enc').includes('amfh264enc'), 'AMD is preferred where present')
+assert.ok(encoderFor('nvd3d11h264enc', 'mfh264enc').includes('nvd3d11h264enc'), 'NVIDIA before the generic fallback')
+assert.ok(encoderFor('qsvh264enc', 'mfh264enc').includes('qsvh264enc'), 'Intel before the generic fallback')
+assert.ok(encoderFor('mfh264enc').includes('mfh264enc'), 'Media Foundation is the floor, not nothing')
+assert.equal(encoderFor('somethingelse'), null)
+
+// Only bitrate travels to the others: cabac and b-frames are AMF's names, and a property that does not
+// exist kills the pipeline exactly like a missing element does.
+const amd = encoderFor('amfh264enc')
+assert.ok(amd.includes('bitrate=9000') && amd.includes('cabac=false') && amd.includes('b-frames=0'))
+for (const other of ['nvd3d11h264enc', 'qsvh264enc', 'mfh264enc']) {
+  const line = encoderFor(other)
+  assert.ok(line.includes('bitrate=9000'), `${other} still takes the bitrate`)
+  assert.ok(!line.includes('cabac') && !line.includes('b-frames'), `${other} must not be given AMF's properties`)
+  // The profile is steered by caps, which every encoder understands, rather than by vendor properties.
+  assert.ok(line.includes('profile=constrained-baseline'))
+}
+
+// The choice is made once and remembered, since hardware does not change while the app runs.
+let asked = 0
+const first = pickVideoEncoder('D:/gst/bin', (element) => { asked += 1; return element === 'mfh264enc' })
+assert.equal(first.element, 'mfh264enc')
+const again = pickVideoEncoder('D:/gst/bin', () => { throw new Error('must not probe twice') })
+assert.equal(again, first)
+assert.ok(asked > 0)
+
 // --- sound ----------------------------------------------------------------
 // Silence is the default: a broadcast that quietly carried the whole desktop's audio because nobody
 // said otherwise would be a privacy failure.
@@ -183,4 +217,4 @@ assert.ok(spawned.options.env.PATH.startsWith('D:\\gst\\bin;'), 'the install dir
 assert.ok(spawned.options.env.PATH.includes('C:\\windows'), 'and the rest of PATH must survive')
 assert.equal(spawned.options.windowsHide, true, 'no console window may flash over a live broadcast')
 
-console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback.')
+console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, the encoder this machine actually has, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback.')

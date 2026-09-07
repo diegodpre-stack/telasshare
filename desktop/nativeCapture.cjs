@@ -90,6 +90,39 @@ function supportsProcessLoopback(bin, run = spawnSync) {
   return processLoopback
 }
 
+// Whichever encoder this machine actually has. The pipeline named amfh264enc outright, so on anything
+// other than an AMD card gst-launch was handed an element that does not exist and died immediately --
+// no offer, no preview, and a viewer waiting for a screen that was never coming.
+//
+// Only bitrate is set on the others. Its unit is kbit/s across all of them, while everything else --
+// cabac, b-frames, presets -- is named differently per vendor, and a property that does not exist fails
+// the whole pipeline exactly like a missing element does. The profile is steered by the caps filter
+// instead, which every one of them understands.
+const VIDEO_ENCODERS = [
+  // AMD first where present: it is the one whose behaviour has been measured end to end here.
+  { element: 'amfh264enc', args: (kbps) => [`bitrate=${kbps}`, 'cabac=false', 'b-frames=0'] },
+  { element: 'nvd3d11h264enc', args: (kbps) => [`bitrate=${kbps}`] },
+  { element: 'nvh264enc', args: (kbps) => [`bitrate=${kbps}`] },
+  { element: 'qsvh264enc', args: (kbps) => [`bitrate=${kbps}`] },
+  // Media Foundation is the floor: present on every supported Windows, hardware where the driver offers
+  // it and software where it does not. Slower than nothing at all.
+  { element: 'mfh264enc', args: (kbps) => [`bitrate=${kbps}`] },
+]
+
+let chosenEncoder = null
+function pickVideoEncoder(bin, has = (element) => elementExists(bin, element)) {
+  if (chosenEncoder !== null) return chosenEncoder
+  chosenEncoder = VIDEO_ENCODERS.find(({ element }) => has(element)) || null
+  return chosenEncoder
+}
+
+function elementExists(bin, element, run = spawnSync) {
+  try {
+    const probe = run(path.join(bin, 'gst-inspect-1.0.exe'), [element], { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
+    return probe.status === 0
+  } catch { return false }
+}
+
 // System sound, minus the app itself. Without that exclusion the broadcast picks up the friends being
 // listened to and sends them their own voices back; excluding this process tree keeps everything else --
 // the game, the music -- and drops only what the app is playing.
@@ -115,7 +148,7 @@ const audioArgs = ({ excludePid, allowProcessLoopback }) => {
 function buildPipelineArgs({
   endpoint, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true,
   audio = false, excludePid = null, allowProcessLoopback = false,
-  stunServer = null, turnServer = null,
+  stunServer = null, turnServer = null, encoder = VIDEO_ENCODERS[0],
 } = {}) {
   if (!endpoint) throw new Error('endpoint is required')
   return [
@@ -139,7 +172,7 @@ function buildPipelineArgs({
     // cabac and b-frames off: constrained baseline forbids both, and B-frames add latency a live
     // broadcast cannot spend. Bitrate is fixed -- whipsink has no congestion control, and webrtcsink's
     // could not drive amfh264enc either ("Bitrate handling is not supported yet for amfh264enc").
-    '!', 'amfh264enc', `bitrate=${positiveInt(bitrateKbps, 12_000)}`, 'cabac=false', 'b-frames=0',
+    '!', encoder.element, ...encoder.args(positiveInt(bitrateKbps, 12_000)),
     '!', 'video/x-h264,profile=constrained-baseline',
     '!', 'h264parse', 'config-interval=-1',
     '!', 'rtph264pay', 'aggregate-mode=zero-latency', 'config-interval=-1', 'pt=96',
@@ -155,8 +188,13 @@ function buildPipelineArgs({
 function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exists = fs.existsSync } = {}) {
   const bin = findGstreamer(env, exists)
   if (!bin) return null
+  const encoder = pickVideoEncoder(bin)
+  // Without an encoder there is no pipeline to build, and saying so lets the caller fall back to the
+  // capture that always works rather than spawn something certain to die.
+  if (!encoder) return null
   const args = buildPipelineArgs({
     ...options,
+    encoder,
     allowProcessLoopback: options.audio ? supportsProcessLoopback(bin) : false,
   })
   const child = spawnFn(path.join(bin, 'gst-launch-1.0.exe'), args, {
@@ -168,4 +206,4 @@ function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exist
   return child
 }
 
-module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv }
+module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, VIDEO_ENCODERS }

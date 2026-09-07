@@ -22,6 +22,10 @@
 .app-download{position:fixed;z-index:12;right:18px;bottom:18px;display:grid;grid-template-columns:34px auto;column-gap:9px;align-items:center;padding:10px 14px;border:1px solid #3b7868;background:#102e28ed;color:#dff9f1;border-radius:13px;text-decoration:none;box-shadow:0 14px 45px #0008;backdrop-filter:blur(10px)}.app-download>span{grid-row:1/3;width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:#49e0b4;color:#06261c;font-size:22px;font-weight:900}.app-download strong{font-size:11px}.app-download small{font-size:9px;color:#7fb6a7}.app-download:hover{transform:translateY(-2px);border-color:#59d8b5;background:#133b32}html[data-desktop=true] .app-download{display:none}@media(max-width:600px){.app-download{right:12px;bottom:12px;padding:9px 11px}}
 .screen-audio input[type=range]{flex:1 1 auto;min-width:0;accent-color:var(--accent,#41ca9f);cursor:pointer}
 .screen-audio span{flex:0 0 auto;font-size:11px;font-variant-numeric:tabular-nums;opacity:.65;min-width:32px;text-align:right}
+.screen-audio .fullscreen-toggle{margin-left:auto}
+.screen-audio.controls-only{width:auto;left:auto;right:12px;transform:translate(0,8px)}
+.screen-audio.controls-only.visible{transform:translate(0,0)}
+.remote-frame:fullscreen .screen-audio.controls-only{right:max(18px,env(safe-area-inset-right));left:auto;width:auto;transform:translate(0,0)}
 .audio-unlock{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:7px;border:0;background:var(--accent,#41ca9f);color:#06261c;font-weight:700;font-size:12px;padding:9px 15px;border-radius:11px;cursor:pointer;z-index:4;box-shadow:0 6px 18px #0006}
 .remote-frame{position:relative}
 .remote-frame:fullscreen .screen-audio{bottom:max(18px,env(safe-area-inset-bottom));width:min(640px,calc(100% - 32px));padding:10px 13px}

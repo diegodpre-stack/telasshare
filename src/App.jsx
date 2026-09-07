@@ -19,7 +19,7 @@ import { applySenderSettings, scaleForTarget } from './senderSettings.js'
 import { preferHardwareVideoCodecs } from './encoderSupport.js'
 import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
 import { createNativeBroadcast, isNativeCaptureAvailable, nativeIceServers } from './nativeBroadcast.js'
-import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
+import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, Minimize, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
 const defaultSignalHost = localHost ? `${location.hostname}:8787` : location.host
@@ -201,17 +201,18 @@ export function GlobalActions() {
 }
 function RemoteScreen({ screen, name, size, onStop }) {
   const videoRef = useRef(null)
-  const audioControlsTimerRef = useRef(null)
+  const controlsTimerRef = useRef(null)
   const [muted, setMuted] = useState(false)
   const [volume, setVolume] = useState(1)
   const [audioBlocked, setAudioBlocked] = useState(false)
-  const [audioControlsVisible, setAudioControlsVisible] = useState(true)
-  const showAudioControls = useCallback(() => {
-    setAudioControlsVisible(true)
-    window.clearTimeout(audioControlsTimerRef.current)
-    audioControlsTimerRef.current = window.setTimeout(() => setAudioControlsVisible(false), 2500)
+  const [controlsVisible, setControlsVisible] = useState(true)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const showControls = useCallback(() => {
+    setControlsVisible(true)
+    window.clearTimeout(controlsTimerRef.current)
+    controlsTimerRef.current = window.setTimeout(() => setControlsVisible(false), 2500)
   }, [])
-  const holdAudioControls = () => window.clearTimeout(audioControlsTimerRef.current)
+  const holdControls = () => window.clearTimeout(controlsTimerRef.current)
   const play = useCallback(async () => {
     const video = videoRef.current; if (!video) return
     try { await video.play(); setAudioBlocked(false) }
@@ -228,20 +229,31 @@ function RemoteScreen({ screen, name, size, onStop }) {
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [play, screen.stream])
   useEffect(() => {
-    if (screen.hasAudio) showAudioControls()
-    return () => window.clearTimeout(audioControlsTimerRef.current)
-  }, [screen.hasAudio, showAudioControls])
+    if (screen.stream) showControls()
+    return () => window.clearTimeout(controlsTimerRef.current)
+  }, [screen.stream, showControls])
+  // Fullscreen can also be left with Escape, or entered from another card, so the button follows the
+  // browser rather than a flag of its own -- otherwise it would offer to enter what you are already in.
+  useEffect(() => {
+    const sync = () => setIsFullscreen(document.fullscreenElement === videoRef.current?.parentElement)
+    document.addEventListener('fullscreenchange', sync)
+    return () => document.removeEventListener('fullscreenchange', sync)
+  }, [])
   const enableAudio = () => { const video = videoRef.current; if (!video) return; video.muted = false; setMuted(false); play() }
-  const goFullscreen = () => { const frame = videoRef.current?.parentElement; return frame?.requestFullscreen?.() || videoRef.current?.webkitEnterFullscreen?.() }
+  const toggleFullscreen = () => {
+    const frame = videoRef.current?.parentElement
+    if (document.fullscreenElement) return document.exitFullscreen?.()
+    return frame?.requestFullscreen?.() || videoRef.current?.webkitEnterFullscreen?.()
+  }
   const connectionDetails = [screen.route === 'turn' ? 'TURN' : screen.route === 'p2p' ? 'P2P' : '', screen.route === 'turn' ? screen.relayProtocol || screen.protocol : screen.protocol, Number.isFinite(screen.rttMs) ? `${screen.rttMs} ms` : '', Number.isFinite(screen.receivedMbps) ? `${screen.receivedMbps} Mbps` : '', Number.isFinite(screen.packetLoss) ? `${screen.packetLoss}% perda` : ''].filter(Boolean).join(' · ')
   return <article className={`screen-card size-${size}`}>
     {screen.error && <p role="alert" className="hint">{screen.error}</p>}
-    <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{Number.isFinite(screen.fps) ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}{connectionDetails ? ` · ${connectionDetails}` : ''}</span></div><div><button title="Tela cheia" onClick={goFullscreen}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
-    <div className="remote-frame" onDoubleClick={goFullscreen} onPointerMove={screen.hasAudio ? showAudioControls : undefined} onPointerDown={screen.hasAudio ? showAudioControls : undefined}>
+    <div className="screen-card-head"><div><i /><strong>Tela de {name}</strong><span>{Number.isFinite(screen.fps) ? `~${screen.fps} FPS` : screen.waiting ? 'aguardando transmissão' : 'conectando'}{screen.stream ? screen.hasAudio ? ' · com áudio' : ' · sem áudio' : ''}{connectionDetails ? ` · ${connectionDetails}` : ''}</span></div><div><button title="Tela cheia" onClick={toggleFullscreen}><Expand size={16} /></button><button title="Encerrar esta visualização" onClick={onStop}><X size={16} /></button></div></div>
+    <div className="remote-frame" onDoubleClick={toggleFullscreen} onPointerMove={showControls} onPointerDown={showControls}>
       <video ref={videoRef} autoPlay playsInline />
       {!screen.stream && <div className="video-placeholder overlay"><div className="spinner" /><strong>Aguardando a tela</strong></div>}
       {screen.hasAudio && audioBlocked && <button className="audio-unlock" onClick={enableAudio}><Volume2 size={16} />Ativar som</button>}
-      {screen.hasAudio && <div className={`screen-audio${audioControlsVisible ? ' visible' : ''}`} onDoubleClick={(event) => event.stopPropagation()} onPointerDown={(event) => { event.stopPropagation(); holdAudioControls() }} onPointerUp={showAudioControls} onPointerCancel={showAudioControls} onKeyDown={showAudioControls} onFocusCapture={showAudioControls}><button title={muted ? 'Ativar som' : 'Silenciar'} onClick={() => setMuted((current) => !current)}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0) }} aria-label={`Volume da tela de ${name}`} /><span>{Math.round((muted ? 0 : volume) * 100)}%</span></div>}
+      {screen.stream && <div className={`screen-audio${screen.hasAudio ? '' : ' controls-only'}${controlsVisible ? ' visible' : ''}`} onDoubleClick={(event) => event.stopPropagation()} onPointerDown={(event) => { event.stopPropagation(); holdControls() }} onPointerUp={showControls} onPointerCancel={showControls} onKeyDown={showControls} onFocusCapture={showControls}>{screen.hasAudio && <><button title={muted ? 'Ativar som' : 'Silenciar'} onClick={() => setMuted((current) => !current)}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0) }} aria-label={`Volume da tela de ${name}`} /><span>{Math.round((muted ? 0 : volume) * 100)}%</span></>}<button className="fullscreen-toggle" title={isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'} aria-label={isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'} onClick={toggleFullscreen}>{isFullscreen ? <Minimize size={16} /> : <Expand size={16} />}</button></div>}
     </div>
   </article>
 }

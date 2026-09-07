@@ -173,9 +173,21 @@ async function chooseDisplaySource(request, callback) {
 function describeSource(source, audio) {
   const window = /^window:(\d+):/.exec(source.id)
   const chosen = { audio: audio === true, name: source.name }
+  // A window's size is not known until it is captured, so only screens can say how many pixels the
+  // encoder will be given -- which is what the bitrate is chosen from.
   if (window) return { ...chosen, kind: 'window', windowHandle: Number(window[1]) }
   const display = /^screen:(\d+):/.exec(source.id)
-  return { ...chosen, kind: 'monitor', monitorIndex: display ? Number(display[1]) : 0 }
+  // By display_id, not by position in the list: those two orders disagree, which is the bug that sent
+  // every native broadcast to the primary monitor. The index in the id is the capture index; the id in
+  // display_id is what matches Electron's own display list.
+  const matched = screen.getAllDisplays().find((item) => String(item.id) === source.display_id)
+  const scale = matched && matched.scaleFactor > 0 ? matched.scaleFactor : 1
+  return {
+    ...chosen,
+    kind: 'monitor',
+    monitorIndex: display ? Number(display[1]) : 0,
+    ...(matched ? { width: Math.round(matched.bounds.width * scale), height: Math.round(matched.bounds.height * scale) } : {}),
+  }
 }
 
 function configureSession() {

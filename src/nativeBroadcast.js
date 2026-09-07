@@ -41,6 +41,32 @@ export function nativeIceServers(servers = []) {
   }
 }
 
+// The native path sends a fixed bitrate -- whipsink has no congestion control, and webrtcsink's could
+// not drive amfh264enc anyway -- so the number chosen at the start is the number sent for the whole
+// broadcast. Sending ten megabits for a 1080p30 desktop is waste that never corrects itself, and the
+// same ten for 1440p60 game footage is not enough.
+//
+// Bits per pixel fall as the picture grows, because neighbouring pixels are more alike the more of them
+// there are, so this is not linear. The exponent fits measured targets for H.264 constrained baseline
+// on game content -- 1080p30 near 5 Mbps, 1080p60 and 1440p30 near 8, 1440p60 near 14 -- and constrained
+// baseline is what the browsers accept, which costs perhaps a quarter over High profile.
+//
+// Floor and ceiling are both real: below the floor a moving picture falls apart whatever the maths says,
+// and the ceiling is the per-viewer limit the app has always had.
+const MIN_KBPS = 1_500
+const MAX_KBPS = 20_000
+export function nativeBitrateKbps(width, height, fps) {
+  const pixels = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+    ? width * height
+    // A window's size is not known until it is captured, and most are smaller than the screen they sit
+    // on, so 1080p is the middle guess rather than the generous one.
+    : 1920 * 1080
+  const rate = Number.isFinite(fps) && fps > 0 ? Math.min(fps, 120) : 60
+  const megapixelsPerSecond = (pixels * rate) / 1_000_000
+  const kbps = Math.round(230 * (megapixelsPerSecond ** 0.75))
+  return Math.min(MAX_KBPS, Math.max(MIN_KBPS, kbps))
+}
+
 export async function isNativeCaptureAvailable() {
   try { return (await bridge()?.isNativeCaptureAvailable?.()) === true } catch { return false }
 }

@@ -11,7 +11,7 @@ const api = {
   addNativeViewer: async (id) => { calls.push(['add', id]); return id !== 'refused' },
   answerNativeViewer: async (id, sdp) => { calls.push(['answer', id, sdp]); return true },
   removeNativeViewer: (id) => calls.push(['remove', id]),
-  pickNativeSource: async (audioRequested) => { calls.push(['pick', audioRequested]); return { kind: 'monitor', monitorIndex: 0, audio: audioRequested, name: 'Tela 1' } },
+  pickNativeSource: async (audioRequested) => { calls.push(['pick', audioRequested]); return { kind: 'monitor', monitorIndex: 0, audio: audioRequested, name: 'Tela 1', width: 2560, height: 1440 } },
   onNativeOffer: (cb) => { handlers.offer = cb; return () => { handlers.offer = null } },
   onNativeCandidate: (cb) => { handlers.candidate = cb; return () => { handlers.candidate = null } },
   onNativeViewerGone: (cb) => { handlers.gone = cb; return () => { handlers.gone = null } },
@@ -40,7 +40,40 @@ globalThis.window = { electronAPI: api }
 globalThis.RTCPeerConnection = FakePeer
 globalThis.MediaStream = class { constructor(tracks = []) { this.tracks = tracks } }
 
-const { createNativeBroadcast, PREVIEW_ID, isNativeCaptureAvailable, nativeIceServers } = await import('../src/nativeBroadcast.js')
+const { createNativeBroadcast, PREVIEW_ID, isNativeCaptureAvailable, nativeIceServers, nativeBitrateKbps } = await import('../src/nativeBroadcast.js')
+
+// --- bitrate for what is actually being encoded ---------------------------
+// Nothing on the native path adapts the bitrate later, so the number picked at the start is the number
+// sent for the whole broadcast: too low ruins 1440p60, too high spends quota on a still desktop.
+const near = (actual, expected, label) =>
+  assert.ok(Math.abs(actual - expected) / expected < 0.15, `${label}: ${actual} kbps is far from ${expected}`)
+near(nativeBitrateKbps(1920, 1080, 30), 5000, '1080p30')
+near(nativeBitrateKbps(1920, 1080, 60), 8000, '1080p60')
+near(nativeBitrateKbps(2560, 1440, 30), 8000, '1440p30')
+near(nativeBitrateKbps(2560, 1440, 60), 14000, '1440p60')
+
+// Doubling the frame rate must cost less than double, and so must doubling the pixels -- bits per pixel
+// fall as the picture grows, which is the whole reason this is not a straight multiplication.
+const p1080at30 = nativeBitrateKbps(1920, 1080, 30)
+const p1080at60 = nativeBitrateKbps(1920, 1080, 60)
+assert.ok(p1080at60 > p1080at30 && p1080at60 < p1080at30 * 2, 'more frames cost more, but less than double')
+assert.ok(nativeBitrateKbps(2560, 1440, 60) > p1080at60, 'more pixels cost more')
+// Same pixel rate, same answer: 1440p30 and 1080p60 are almost the same amount of work.
+near(nativeBitrateKbps(2560, 1440, 30), nativeBitrateKbps(1920, 1080, 60), 'mesmo trabalho')
+
+// The ceiling is the per-viewer limit the app has always had; the floor is where a moving picture falls
+// apart whatever the arithmetic says.
+assert.equal(nativeBitrateKbps(3840, 2160, 60), 20000, '4K60 must not exceed the per-viewer ceiling')
+assert.equal(nativeBitrateKbps(320, 240, 15), 1500, 'a tiny window still needs a usable floor')
+
+// A window has no known size until it is captured, so an unknown one is budgeted as 1080p rather than
+// guessed generously -- and junk must not produce a broken argument.
+assert.equal(nativeBitrateKbps(undefined, undefined, 60), nativeBitrateKbps(1920, 1080, 60))
+for (const bad of [[0, 0], [-1, 100], [NaN, 1080], ['a', 'b'], [null, null]]) {
+  assert.equal(nativeBitrateKbps(bad[0], bad[1], 60), nativeBitrateKbps(1920, 1080, 60), `${bad} must fall back`)
+}
+assert.equal(nativeBitrateKbps(1920, 1080, 0), nativeBitrateKbps(1920, 1080, 60), 'a missing frame rate falls back too')
+assert.ok(Number.isInteger(nativeBitrateKbps(2560, 1440, 60)), 'the pipeline takes an integer')
 
 // --- ICE servers for the pipeline ----------------------------------------
 // Without these it gathers host candidates only: private addresses that work on loopback and are
@@ -77,10 +110,12 @@ const native = createNativeBroadcast({
 
 // The picker's audio answer has to reach the main process, or the checkbox decides nothing and sound is
 // shared whatever anyone ticked.
-assert.deepEqual(await native.pickSource(true), { kind: 'monitor', monitorIndex: 0, audio: true, name: 'Tela 1' })
+assert.deepEqual(await native.pickSource(true), { kind: 'monitor', monitorIndex: 0, audio: true, name: 'Tela 1', width: 2560, height: 1440 })
 assert.deepEqual(calls.at(-1), ['pick', true])
 assert.equal((await native.pickSource()).audio, false, 'silence unless asked for')
 assert.deepEqual(calls.at(-1), ['pick', false], 'a missing argument must not reach the picker as undefined')
+// The screen's real size has to reach the caller, or the bitrate is chosen for a guess.
+assert.equal((await native.pickSource(false)).width, 2560)
 
 assert.equal(await native.start({ fps: 60 }), true)
 assert.deepEqual(calls.at(-1), ['start', { fps: 60 }])
@@ -139,4 +174,4 @@ assert.ok(calls.some(([kind]) => kind === 'stop'))
 native.dispose()
 assert.equal(handlers.offer, null, 'listeners must be released, or a second broadcast gets two of each')
 
-console.log('PASS: ICE servers translated for the pipeline, audio answered by the picker, viewer signalling forwarded, preview answered locally, preview pipeline released on close, listeners disposed.')
+console.log('PASS: bitrate follows resolution and frame rate, ICE servers translated for the pipeline, audio answered by the picker, viewer signalling forwarded, preview answered locally, preview pipeline released on close, listeners disposed.')

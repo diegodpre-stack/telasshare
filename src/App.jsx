@@ -18,7 +18,7 @@ import { buildIceConfiguration, initialIceStage, canPreserveWithoutTurn } from '
 import { applySenderSettings, scaleForTarget } from './senderSettings.js'
 import { preferHardwareVideoCodecs } from './encoderSupport.js'
 import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
-import { createNativeBroadcast, isNativeCaptureAvailable, nativeIceServers } from './nativeBroadcast.js'
+import { createNativeBroadcast, isNativeCaptureAvailable, nativeBitrateKbps, nativeIceServers } from './nativeBroadcast.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, Minimize, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -942,7 +942,9 @@ export default function App() {
         // servers the browser path uses have to be handed to it explicitly.
         ...nativeIceServers(iceServersRef.current),
         fps,
-        bitrateKbps: Math.round(MAX_BITRATE_PER_VIEWER / 1000 / 2),
+        // Fixed for the whole broadcast, since nothing on this path adapts it later -- so it is chosen
+        // from what will actually be encoded rather than from a single number for every case.
+        bitrateKbps: nativeBitrateKbps(source.width, source.height, fps),
       }).catch(() => false)
       if (started) {
         setNativeSourceName(source.name || '')

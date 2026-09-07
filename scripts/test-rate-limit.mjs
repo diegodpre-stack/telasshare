@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createRateLimiter, BYTE_BUCKET, CHAT_BUCKET, MESSAGE_BUCKET, STRIKE_LIMIT } from '../server/rateLimit.js'
+import { createRateLimiter, BYTE_BUCKET, CHAT_WINDOW, MESSAGE_BUCKET, STRIKE_LIMIT } from '../server/rateLimit.js'
 
 // The clock is driven by the test, so refill and decay are decisions that can be checked rather than
 // things that only happen after a real wait.
@@ -72,14 +72,24 @@ for (let round = 0; round < 40; round += 1) { relentless.advance(100); relentles
 assert.ok(relentless.limiter.flooding, `sustained abuse reaches the limit (${relentless.limiter.strikes} >= ${STRIKE_LIMIT})`)
 
 // --- chat has its own budget ----------------------------------------------
+// A window rather than a bucket, and the difference is the whole point: a bucket drips one message back
+// every couple of seconds, which is the pace at which a conversation feels throttled even where the
+// average is generous. This hands the whole allowance back at once.
 const chat = harness()
 let sentNow = 0
 while (chat.limiter.acceptChat()) sentNow += 1
-assert.equal(sentNow, CHAT_BUCKET.capacity, 'a handful in hand')
+assert.equal(sentNow, CHAT_WINDOW.limit, 'ten in hand')
 assert.equal(chat.limiter.acceptChat(), false)
-chat.advance(2_000)
-assert.equal(chat.limiter.acceptChat(), true, 'and one more every couple of seconds')
-assert.equal(chat.limiter.acceptChat(), false)
+
+// Part-way through the window, nothing has come back yet.
+chat.advance(CHAT_WINDOW.windowMs - 100)
+assert.equal(chat.limiter.acceptChat(), false, 'the window has not turned over')
+
+// And when it turns, the whole allowance is there again -- not one message, all ten.
+chat.advance(200)
+let afterWindow = 0
+while (chat.limiter.acceptChat()) afterWindow += 1
+assert.equal(afterWindow, CHAT_WINDOW.limit, 'the allowance renews whole')
 // Being told to slow down is not abuse: somebody typing fast must not lose their connection over it.
 assert.ok(!chat.limiter.flooding)
 // Nor does it touch the budget the rest of the app is using.

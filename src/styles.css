@@ -125,3 +125,43 @@
 .chat-compose button{flex:none;border:1px solid #326a5b;background:#13382f;color:#91e6cc;border-radius:9px;padding:0 12px;display:flex;align-items:center}
 .chat-compose button:disabled{opacity:.4}
 .chat-badge{margin-left:6px;background:#ff6871;color:#2a0d10;border-radius:9px;padding:1px 6px;font-size:9px;font-weight:800}
+
+/* Panels the person using them arranges: a flex row rather than a fixed grid, each panel carrying its
+   own size, and the order coming from the layout module. The stage takes whatever is left, so the
+   others are sized against the picture instead of the picture being squeezed by arithmetic. */
+.workspace.panels{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px}
+.panel.resizable{flex:0 0 auto;overflow:hidden;resize:both;min-width:200px;max-width:680px}
+.panel.people{width:300px;height:560px}
+.panel.chat{width:340px;height:560px;max-height:none}
+.panel.settings{width:300px}
+/* The stage cannot be resized sideways: it is what the others leave behind, so a width here would only
+   fight them. Height is still its own. */
+.panel.stage{flex:1 1 460px;min-width:360px;max-width:none;resize:vertical;height:620px}
+.panel.people,.panel.chat{display:flex;flex-direction:column}
+.panel.people .people-list{flex:1;overflow-y:auto}
+.panel.stage .screens-grid{overflow-y:auto}
+/* The heading is the handle. Making the whole panel draggable would mean no text inside it could be
+   selected and no slider inside it could be dragged. */
+.panel-heading[draggable=true]{cursor:grab}
+.panel-heading[draggable=true]:active{cursor:grabbing}
+.panel.dragging{opacity:.45}
+.panel.drop-target{outline:1px dashed #2f6f5d;outline-offset:-1px}
+.layout-reset{margin-left:auto}
+
+/* The two shortcuts used to float over the bottom-right corner of whatever was on screen. In the header
+   they are out of the way of the thing being watched. */
+.global-actions.inline{position:static;inset:auto;gap:6px}
+.global-actions.inline button{box-shadow:none;backdrop-filter:none;padding:7px 10px}
+.global-actions.inline .app-download-button small{display:none}
+.global-actions.inline .app-download-button strong{font-size:11px}
+
+.chat-count{align-self:center;font-size:9px;font-weight:700;color:#5d7286;min-width:50px;text-align:right}
+.chat-count.full{color:#ff9299}
+
+/* On a small screen nobody is arranging anything: the stored sizes are set as inline styles, so undoing
+   them here has to be explicit. */
+@media(max-width:900px){
+  .workspace.panels{display:block}
+  .panel.resizable{width:auto!important;height:auto!important;min-width:0;max-width:none;resize:none;margin-bottom:14px}
+  .global-actions.inline .app-download-button strong{font-size:0}
+}

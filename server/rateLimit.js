@@ -16,9 +16,11 @@ export const MESSAGE_BUCKET = { capacity: 400, perSecond: 120 }
 // Counting messages alone is not enough: an offer may be tens of kilobytes, and the relay multiplies it
 // by everyone in the room. This is the ceiling on that.
 export const BYTE_BUCKET = { capacity: 2_000_000, perSecond: 512_000 }
-// Typing, not signalling. Five in hand and one every two seconds after that, which nobody having a
-// conversation will ever notice and which makes flooding a room pointless.
-export const CHAT_BUCKET = { capacity: 5, perSecond: 0.5 }
+// Typing, not signalling, and deliberately not a bucket. A bucket drips: it hands back one message
+// every couple of seconds, which is exactly the pace at which a conversation feels throttled even though
+// the average is fine. A window is blunter and reads better -- ten messages, and five seconds later ten
+// again, whole.
+export const CHAT_WINDOW = { limit: 10, windowMs: 5_000 }
 
 // A connection that keeps hitting the ceiling is not bursting, it is flooding. Strikes decay, so an
 // honest burst that overshoots once is forgiven long before it reaches the limit.
@@ -30,7 +32,9 @@ export const ERROR_INTERVAL_MS = 1_000
 const fill = (spec) => ({ ...spec, tokens: spec.capacity, at: null })
 
 export function createRateLimiter({ now = () => Date.now() } = {}) {
-  const buckets = { messages: fill(MESSAGE_BUCKET), bytes: fill(BYTE_BUCKET), chat: fill(CHAT_BUCKET) }
+  const buckets = { messages: fill(MESSAGE_BUCKET), bytes: fill(BYTE_BUCKET) }
+  let chatWindowAt = null
+  let chatCount = 0
   let strikes = 0
   let strikesAt = null
   let lastErrorAt = null
@@ -69,7 +73,13 @@ export function createRateLimiter({ now = () => Date.now() } = {}) {
 
     // Chat has its own budget on top of the shared one. Refused here is a person typing too fast, which
     // is worth a word back rather than a strike -- flooding through this costs a connection anyway.
-    acceptChat() { return take(buckets.chat, 1) },
+    acceptChat() {
+      const at = now()
+      if (chatWindowAt === null || at - chatWindowAt >= CHAT_WINDOW.windowMs) { chatWindowAt = at; chatCount = 0 }
+      if (chatCount >= CHAT_WINDOW.limit) return false
+      chatCount += 1
+      return true
+    },
 
     // True when a complaint is worth sending, so that answering a flood does not become the flood.
     shouldWarn() {

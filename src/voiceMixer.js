@@ -41,6 +41,7 @@ export function createVoiceMixer({
   let deafened = false
   let muted = false
   let microphone = null
+  let micMeter = null
 
   const save = () => {
     try { storage?.setItem(STORAGE_KEY, JSON.stringify(volumes)) } catch { /* a full or private store is not worth failing over */ }
@@ -49,6 +50,54 @@ export function createVoiceMixer({
   const gainFor = (name) => (deafened ? 0 : clampVolume(volumes[name] ?? DEFAULT_VOLUME) / 100)
   const applyAll = () => { for (const [name, voice] of voices) voice.gain.gain.value = gainFor(name) }
   const announce = () => onChange?.()
+
+  // A meter tapped off the source, before the gain: it reports whether someone is actually speaking,
+  // which is a fact about them and must not change because this listener turned them down or deafened.
+  // Optional throughout -- a context without an analyser simply reports no levels rather than failing.
+  const meterFor = (stream) => {
+    try {
+      const analyser = context.createAnalyser?.()
+      if (!analyser) return null
+      analyser.fftSize = 512
+      analyser.smoothingTimeConstant = 0.5
+      const source = context.createMediaStreamSource(stream)
+      source.connect(analyser)
+      return { analyser, source, samples: new Uint8Array(analyser.fftSize) }
+    } catch { return null }
+  }
+  const readMeter = (meter) => {
+    if (!meter) return 0
+    try {
+      meter.analyser.getByteTimeDomainData(meter.samples)
+      let sum = 0
+      for (const sample of meter.samples) { const centred = (sample - 128) / 128; sum += centred * centred }
+      // Root mean square, then a gentle curve: raw RMS on speech sits so low that a linear bar looks dead.
+      return Math.min(1, Math.sqrt(sum / meter.samples.length) * 4)
+    } catch { return 0 }
+  }
+  // Chromium will not pull audio out of a remote MediaStream through Web Audio alone: the source node
+  // is created happily and then delivers silence. Attaching the same stream to a media element as well
+  // is what starts it flowing. The element is muted and never heard -- the gain node is still what
+  // reaches the speakers, so per-person volume and deafen keep working exactly as they read.
+  const keepFlowing = (stream) => {
+    if (typeof document === 'undefined') return null
+    try {
+      const element = document.createElement('audio')
+      element.muted = true
+      element.autoplay = true
+      element.srcObject = stream
+      element.play?.().catch(() => {})
+      return element
+    } catch { return null }
+  }
+  const releaseFlow = (element) => {
+    if (!element) return
+    try { element.pause?.(); element.srcObject = null } catch { /* already detached */ }
+  }
+  const releaseMeter = (meter) => {
+    if (!meter) return
+    try { meter.source.disconnect(); meter.analyser.disconnect() } catch { /* already torn down */ }
+  }
 
   return {
     get deafened() { return deafened },
@@ -64,7 +113,7 @@ export function createVoiceMixer({
       gain.gain.value = gainFor(name)
       source.connect(gain)
       gain.connect(context.destination)
-      voices.set(name, { source, gain, stream })
+      voices.set(name, { source, gain, stream, meter: meterFor(stream), flow: keepFlowing(stream) })
       return gain
     },
 
@@ -72,9 +121,22 @@ export function createVoiceMixer({
       const voice = voices.get(name)
       if (!voice) return false
       try { voice.source.disconnect(); voice.gain.disconnect() } catch { /* already torn down */ }
+      releaseMeter(voice.meter)
+      releaseFlow(voice.flow)
       voices.delete(name)
       return true
     },
+
+    // How loud each person is right now, 0 to 1, sampled on demand rather than pushed: the interface
+    // decides how often it wants to redraw, and nothing runs when nobody is looking.
+    levels() {
+      const result = {}
+      for (const [name, voice] of voices) result[name] = readMeter(voice.meter)
+      return result
+    },
+    // The same reading for the microphone, so someone can see that they are being picked up before
+    // asking a friend whether they can be heard. Zero while muted, because nothing is being sent.
+    micLevel: () => (muted ? 0 : readMeter(micMeter)),
 
     getVolume: (name) => clampVolume(volumes[name] ?? DEFAULT_VOLUME),
 
@@ -100,6 +162,9 @@ export function createVoiceMixer({
     // track sends nothing, so nobody has to be trusted to honour it.
     useMicrophone(stream) {
       microphone = stream || null
+      releaseMeter(micMeter)
+      // Never connected to the destination: metering the microphone must not play it back into the room.
+      micMeter = microphone ? meterFor(microphone) : null
       this.setMuted(muted)
       return microphone
     },
@@ -115,6 +180,8 @@ export function createVoiceMixer({
 
     close() {
       for (const name of [...voices.keys()]) this.detach(name)
+      releaseMeter(micMeter)
+      micMeter = null
       microphone = null
       return context.close?.()
     },

@@ -225,13 +225,13 @@ const tls = process.env.TLS_CERT_PATH && process.env.TLS_KEY_PATH
 const server = tls ? createHttpsServer(tls, app) : createHttpServer(app)
 const wss = new WebSocketServer({ server, maxPayload: 128 * 1024 })
 const clients = new Map()
-const allowedTypes = new Set(['hello', 'heartbeat', 'broadcast-start', 'broadcast-stop', 'watch-request', 'restart-request', 'moderate', 'signal', 'stop'])
+const allowedTypes = new Set(['hello', 'heartbeat', 'broadcast-start', 'broadcast-stop', 'voice-join', 'voice-leave', 'watch-request', 'restart-request', 'moderate', 'signal', 'stop'])
 
 const safeSend = (socket, message) => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }
 const roomClients = (roomId) => [...clients.values()].filter((client) => client.roomId === roomId)
-const publicUsers = (roomId) => roomClients(roomId).map(({ id, name, role, broadcasting }) => ({ id, name, role, broadcasting }))
+const publicUsers = (roomId) => roomClients(roomId).map(({ id, name, role, broadcasting, voice }) => ({ id, name, role, broadcasting, voice }))
 const broadcastUsers = (roomId) => {
   const message = { type: 'users', users: publicUsers(roomId) }
   for (const { socket } of roomClients(roomId)) safeSend(socket, message)
@@ -270,7 +270,7 @@ wss.on('connection', (socket, request) => {
         safeSend(socket, { type: 'error', message: 'Este nome de usuário já está online.' }); return socket.close(1008, 'Nome em uso')
       }
       const role = Object.hasOwn(roleRank, authenticated.role) ? authenticated.role : 'member'
-      clients.set(id, { id, name, role, roomId: room.id, broadcasting: false, socket })
+      clients.set(id, { id, name, role, roomId: room.id, broadcasting: false, voice: false, socket })
       clearTimeout(room.deleteTimer); room.deleteTimer = null
       registered = true
       safeSend(socket, { type: 'welcome', id, role, roomName: room.name })
@@ -281,6 +281,10 @@ wss.on('connection', (socket, request) => {
     if (message.type === 'heartbeat') return safeSend(socket, { type: 'heartbeat', at: Date.now() })
     if (message.type === 'broadcast-start') { sender.broadcasting = true; return broadcastUsers(sender.roomId) }
     if (message.type === 'broadcast-stop') { sender.broadcasting = false; return broadcastUsers(sender.roomId) }
+    // Who is in voice is presence, not signalling: every peer needs it to know whom to open a connection
+    // to, and it is the same list the interface draws. The audio itself never passes through here.
+    if (message.type === 'voice-join') { sender.voice = true; return broadcastUsers(sender.roomId) }
+    if (message.type === 'voice-leave') { sender.voice = false; return broadcastUsers(sender.roomId) }
     const target = typeof message.to === 'string' ? clients.get(message.to) : null
     if (!target || target.id === id || target.roomId !== sender.roomId) return safeSend(socket, { type: 'error', message: 'Usuário indisponível.' })
 
@@ -307,11 +311,14 @@ wss.on('connection', (socket, request) => {
       // A native sender receives no trickled candidates -- WHIP has no channel for them -- so the viewer
       // has to put all of its own inside the answer. It can only know to do that if the offer says so.
       if (message.nativeSender !== undefined && typeof message.nativeSender !== 'boolean') return safeSend(socket, { type: 'error', message: 'Origem de captura inválida.' })
+      // Voice rides the same channel as video and has to be told apart on arrival, or an answer meant
+      // for a microphone would be handed to a screen connection.
+      if (message.voice !== undefined && typeof message.voice !== 'boolean') return safeSend(socket, { type: 'error', message: 'Canal de sinalização inválido.' })
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })
       const descriptionOk = message.description === undefined || validDescription(message.description)
       const candidateOk = message.candidate === undefined || validCandidate(message.candidate)
       if (!descriptionOk || !candidateOk || (message.description === undefined && message.candidate === undefined)) return safeSend(socket, { type: 'error', message: 'Sinal WebRTC inválido.' })
-      return safeSend(target.socket, { type: 'signal', from: id, connectionId: message.connectionId, mode: message.mode, turnTransport: message.turnTransport, allowDirect: message.allowDirect, nativeSender: message.nativeSender, description: message.description, candidate: message.candidate })
+      return safeSend(target.socket, { type: 'signal', from: id, connectionId: message.connectionId, mode: message.mode, turnTransport: message.turnTransport, allowDirect: message.allowDirect, nativeSender: message.nativeSender, voice: message.voice, description: message.description, candidate: message.candidate })
     }
     if (message.type === 'stop') {
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })

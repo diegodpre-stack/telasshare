@@ -19,7 +19,9 @@ import { applySenderSettings, scaleForTarget } from './senderSettings.js'
 import { preferHardwareVideoCodecs } from './encoderSupport.js'
 import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
 import { createNativeBroadcast, isNativeCaptureAvailable, nativeBitrateKbps, nativeIceServers } from './nativeBroadcast.js'
-import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, KeyRound, LogOut, Minimize, MonitorUp, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
+import { createVoiceChat, isVoiceConnection } from './voiceChat.js'
+import { createVoiceMixer, DEFAULT_VOLUME, MAX_VOLUME } from './voiceMixer.js'
+import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, HeadphoneOff, Headphones, KeyRound, LogOut, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
 const defaultSignalHost = localHost ? `${location.hostname}:8787` : location.host
@@ -111,6 +113,12 @@ function iceGathered(pc) {
 }
 
 const audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
+
+// The exact opposite of the constraints above, and deliberately so. Screen audio is a signal to
+// reproduce faithfully: processing it would chew up a game's soundtrack. A microphone in a room with
+// speakers is the opposite problem -- without echo cancellation everyone hears themselves back through
+// whoever is listening on speakers, and one person's fan becomes everyone's noise floor.
+const microphoneConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 48000 }
 
 async function attachDesktopWindowAudio(stream, onError) {
   const bridge = window.electronAPI
@@ -352,6 +360,24 @@ export default function App() {
   useEffect(() => { nativeActiveRef.current = nativeActive }, [nativeActive])
   useEffect(() => { broadcastingRef.current = broadcasting }, [broadcasting])
   const [showPeople, setShowPeople] = useState(true)
+  // Voice is entirely separate from the screen: its own connections, its own mixer, its own presence.
+  // Nothing below is read by the broadcast path, and nothing here can stop a screen from being shared.
+  const [voiceJoined, setVoiceJoined] = useState(false)
+  const [voiceMuted, setVoiceMuted] = useState(false)
+  const [voiceDeafened, setVoiceDeafened] = useState(false)
+  const [voiceConnections, setVoiceConnections] = useState([])
+  const [voiceLevels, setVoiceLevels] = useState({ peers: {}, self: 0 })
+  // Bumped whenever a volume changes, so the sliders redraw. The values themselves live in the mixer,
+  // which owns them and persists them; duplicating them into React state would give two sources of truth.
+  const [voiceRevision, setVoiceRevision] = useState(0)
+  const voiceRef = useRef(null)
+  const mixerRef = useRef(null)
+  const voiceMicRef = useRef(null)
+  const voiceJoinedRef = useRef(false)
+  // peerId -> name, resolved when a voice stream arrives so the mixer can key volumes by name. Names are
+  // unique inside a room and survive a reconnection; peer ids do not.
+  const voiceNamesRef = useRef(new Map())
+  const usersRef = useRef([])
   const socketRef = useRef(null)
   const pcsRef = useRef(new Map())
   const earlyCandidatesRef = useRef(new Map())
@@ -436,6 +462,105 @@ export default function App() {
     nativeRef.current = native
     return () => { native.dispose(); nativeRef.current = null }
   }, [nativeAvailable, send])
+
+  // --- voice --------------------------------------------------------------------------------------
+  // A mesh of audio-only connections, one per person who is also in voice, built and torn down entirely
+  // by who appears in the room list with voice on. It never touches localStreamRef, pcsRef or the
+  // pipeline: a screen can start, stop or fail without a conversation noticing, and the reverse.
+  const mutedBeforeDeafenRef = useRef(false)
+  const leaveVoiceRef = useRef(null)
+
+  const leaveVoice = useCallback((notify = true) => {
+    if (!voiceJoinedRef.current) return
+    voiceJoinedRef.current = false
+    voiceRef.current?.close(); voiceRef.current = null
+    mixerRef.current?.close(); mixerRef.current = null
+    // The microphone light stays on until the track itself is stopped, and leaving voice with it lit is
+    // the kind of thing nobody forgives.
+    voiceMicRef.current?.getTracks().forEach((track) => track.stop()); voiceMicRef.current = null
+    voiceNamesRef.current.clear()
+    setVoiceJoined(false); setVoiceConnections([]); setVoiceLevels({ peers: {}, self: 0 })
+    setVoiceMuted(false); setVoiceDeafened(false)
+    if (notify) send({ type: 'voice-leave' })
+  }, [send])
+  leaveVoiceRef.current = leaveVoice
+
+  const joinVoice = useCallback(async () => {
+    if (voiceJoinedRef.current) return
+    let microphone
+    try { microphone = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints, video: false }) }
+    catch (error) {
+      setNotice(['NotAllowedError', 'SecurityError'].includes(error?.name)
+        ? 'O acesso ao microfone foi negado. Libere o microfone para este aplicativo e tente de novo.'
+        : error?.name === 'NotFoundError'
+          ? 'Nenhum microfone foi encontrado nesta máquina.'
+          : 'Não foi possível abrir o microfone.')
+      return
+    }
+    const mixer = createVoiceMixer({ onChange: () => setVoiceRevision((current) => current + 1) })
+    mixer.useMicrophone(microphone)
+    // Clicking the button is the gesture browsers wait for, so this is the moment the context can start.
+    try { await mixer.resume() } catch { /* a context that will not start still lets the microphone send */ }
+    const voice = createVoiceChat({
+      selfId,
+      send,
+      getIceServers: () => iceServersRef.current,
+      onStream: (peerId, stream) => {
+        const name = usersRef.current.find((user) => user.id === peerId)?.name || peerId
+        voiceNamesRef.current.set(peerId, name)
+        mixerRef.current?.attach(name, stream)
+        setVoiceRevision((current) => current + 1)
+      },
+      onPeerGone: (peerId) => {
+        const name = voiceNamesRef.current.get(peerId)
+        if (name) mixerRef.current?.detach(name)
+        voiceNamesRef.current.delete(peerId)
+        setVoiceRevision((current) => current + 1)
+      },
+      onStateChange: () => setVoiceConnections(voiceRef.current?.connections || []),
+    })
+    voice.setLocalStream(microphone)
+    mixerRef.current = mixer; voiceRef.current = voice; voiceMicRef.current = microphone
+    voiceJoinedRef.current = true
+    setVoiceJoined(true); setVoiceMuted(false); setVoiceDeafened(false)
+    send({ type: 'voice-join' })
+    setNotice('Você entrou no áudio da sala. Quem também entrar aparece aqui com o próprio volume.')
+  }, [selfId, send])
+
+  // Presence is the only input the mesh needs: everyone in the room list with voice on, minus yourself.
+  useEffect(() => {
+    usersRef.current = users
+    if (!voiceJoined) return
+    voiceRef.current?.setPeers(users.filter((user) => user.voice && user.id !== selfId).map((user) => user.id))
+  }, [users, voiceJoined, selfId])
+
+  // Metering runs only while there is a voice session and the panel showing it is open. Six times a
+  // second is enough for a level to look live and cheap enough not to matter next to a broadcast.
+  useEffect(() => {
+    if (!voiceJoined || !showPeople) return
+    const timer = setInterval(() => {
+      const mixer = mixerRef.current
+      if (mixer) setVoiceLevels({ peers: mixer.levels(), self: mixer.micLevel() })
+    }, 160)
+    return () => clearInterval(timer)
+  }, [voiceJoined, showPeople])
+
+  const toggleMute = () => {
+    const mixer = mixerRef.current
+    if (!mixer) return
+    setVoiceMuted(mixer.setMuted(!mixer.muted))
+  }
+  // Deafening mutes as well -- hearing nobody while still being heard is never what anyone means by it.
+  // Coming back restores whatever the microphone was before, rather than assuming it was on.
+  const toggleDeafen = () => {
+    const mixer = mixerRef.current
+    if (!mixer) return
+    const next = !mixer.deafened
+    if (next) { mutedBeforeDeafenRef.current = mixer.muted; setVoiceMuted(mixer.setMuted(true)) }
+    else setVoiceMuted(mixer.setMuted(mutedBeforeDeafenRef.current === true))
+    setVoiceDeafened(mixer.setDeafened(next))
+  }
+  const setPeerVolume = (name, value) => mixerRef.current?.setVolume(name, value)
 
   // One sweep across every peer we are transmitting to, only while the preview panel that shows the
   // result is open. Closing it stops the sampling; the numbers resume from the next sweep.
@@ -788,7 +913,7 @@ export default function App() {
       socket.onerror = () => { if (!disposed) setNotice('Oscilação no servidor de sinalização. Tentando reconectar…') }
       socket.onmessage = ({ data }) => {
         let message; try { message = JSON.parse(data) } catch { return }
-        if (message.type === 'welcome') { setSelfId(message.id); setModerationRole(message.role); setIsAdmin(['owner', 'admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName); if (broadcastingRef.current) send({ type: 'broadcast-start' }) }
+        if (message.type === 'welcome') { setSelfId(message.id); setModerationRole(message.role); setIsAdmin(['owner', 'admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName); if (broadcastingRef.current) send({ type: 'broadcast-start' }); if (voiceJoinedRef.current) send({ type: 'voice-join' }) }
         else if (message.type === 'users') {
           const nextIds = new Set(message.users.map((user) => user.id))
           if (knownUsersRef.current && message.users.some((user) => user.id !== selfId && !knownUsersRef.current.has(user.id))) playChime('join')
@@ -796,8 +921,9 @@ export default function App() {
           setUsers(message.users)
         }
         else if (message.type === 'watch-request') { if (localStreamRef.current) playChime('viewer'); shareWith(message.from, message.mode) }
+        else if (message.type === 'signal' && message.voice) voiceRef.current?.handleSignal(message)
         else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); signalQueueRef.current = signalQueueRef.current.then(() => handleSignal(message)).catch(() => {}) }
-        else if (message.type === 'restart-request') pcsRef.current.get(message.connectionId)?.restart?.()
+        else if (message.type === 'restart-request') { if (isVoiceConnection(message.connectionId)) voiceRef.current?.restart(message.from); else pcsRef.current.get(message.connectionId)?.restart?.() }
         else if (message.type === 'stop') {
           closeConnection(message.connectionId, false)
           if (message.reason) setRemoteScreens((current) => ({ ...current, [message.connectionId]: { peerId: message.from, error: message.reason === 'ice-timeout' ? 'A negociação terminou, mas a conexão de rede não foi estabelecida. Feche esta janela e tente outro modo.' : 'A negociação não recebeu resposta a tempo. Feche esta janela, atualizem ambos o app e tentem novamente.' } }))
@@ -809,7 +935,7 @@ export default function App() {
       }
     }
     connect()
-    return () => { disposed = true; clearTimeout(reconnectTimer); clearInterval(heartbeatTimer); socketRef.current?.close(); socketRef.current = null; knownUsersRef.current = null; closeAll() }
+    return () => { disposed = true; clearTimeout(reconnectTimer); clearInterval(heartbeatTimer); socketRef.current?.close(); socketRef.current = null; knownUsersRef.current = null; leaveVoiceRef.current?.(false); closeAll() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joined])
 
@@ -1049,6 +1175,15 @@ export default function App() {
   const moderate = (user, action) => send({ type: 'moderate', to: user.id, action })
 
   const peers = useMemo(() => users.filter((user) => user.id !== selfId), [users, selfId])
+  // Read out of the mixer, which owns and persists them; the revision counter is what says when to look
+  // again. Keeping a second copy in React state would let the two disagree after a reload.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const voiceVolumes = useMemo(() => Object.fromEntries(users.map((user) => [user.name, mixerRef.current?.getVolume(user.name) ?? DEFAULT_VOLUME])), [users, voiceRevision])
+  const voicePeers = users.filter((user) => user.voice && user.id !== selfId)
+  const voiceConnectedCount = voiceConnections.filter((entry) => entry.connected).length
+  const voiceStatus = !voicePeers.length ? 'só você por enquanto'
+    : voiceConnectedCount === voicePeers.length ? `${voiceConnectedCount} ${voiceConnectedCount === 1 ? 'pessoa conectada' : 'pessoas conectadas'}`
+      : `${voiceConnectedCount} de ${voicePeers.length} conectadas`
   const userName = (id) => users.find((user) => user.id === id)?.name || 'amigo'
   const remoteEntries = Object.entries(remoteScreens)
   // Native broadcasts have no local stream to test, so the flag the UI reads has to cover both paths.
@@ -1086,12 +1221,15 @@ export default function App() {
     {!isBroadcasting && <button className="start-broadcast standalone" onClick={startBroadcast}><Radio size={18} />Iniciar transmissão</button>}
     {isBroadcasting && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {nativeActive ? `captura nativa${nativeSourceName ? ` · ${nativeSourceName}` : ''}` : resolutions[resolution].label} · preferência {fps} FPS · {nativeActive ? (audioStatus === 'on' ? 'com som do sistema' : 'sem áudio') : audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={openSelfPreview}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
+    <section className="voice-bar" aria-label="Áudio da sala">{!voiceJoined
+      ? <button type="button" className="voice-join" onClick={joinVoice}><PhoneCall size={17} /><span><strong>Entrar no áudio</strong><small>{users.filter((user) => user.voice).length ? `${users.filter((user) => user.voice).length} na conversa agora` : 'ninguém na conversa ainda'}</small></span></button>
+      : <><div className="voice-self"><span className={`voice-meter${voiceMuted ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.self || 0)})` }} /></span><div><strong>Você está no áudio</strong><small>{voiceStatus}</small></div></div><div className="voice-actions"><button type="button" className={voiceMuted ? 'off' : ''} onClick={toggleMute} aria-pressed={voiceMuted}>{voiceMuted ? <MicOff size={16} /> : <Mic size={16} />}{voiceMuted ? 'Microfone desligado' : 'Microfone ligado'}</button><button type="button" className={voiceDeafened ? 'off' : ''} onClick={toggleDeafen} aria-pressed={voiceDeafened}>{voiceDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}{voiceDeafened ? 'Não está ouvindo' : 'Ouvindo todos'}</button><button type="button" className="leave-voice" onClick={() => leaveVoice(true)}><PhoneOff size={16} />Sair do áudio</button></div></>}</section>
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
     <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>
     {nativeAvailable && <label className="size-control">Captura da sua tela<select value={nativeWanted ? 'nativa' : 'navegador'} onChange={(event) => setNativeWanted(event.target.value === 'nativa')} disabled={isBroadcasting}><option value="navegador">Navegador (padrão)</option><option value="nativa">Nativa — experimental</option></select><span>{isBroadcasting ? 'Não muda uma transmissão já iniciada.' : 'A nativa mantém o quadro na placa de vídeo e sustenta 60 FPS em 1440p. O som é o do sistema inteiro, sem o do próprio TelasShare.'}</span></label>}
     <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><label className="quality-toggle" htmlFor="quality-toggle"><SlidersHorizontal size={16} /><span>Configurar transmissão</span></label></div>
     <div className={`workspace multi-workspace${showPeople ? '' : ' people-hidden'}`}>
-      {showPeople && <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div></article>)}</div></section>}
+      {showPeople && <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}{user.voice ? ' · no áudio' : ''}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div>{voiceJoined && user.voice && user.id !== selfId && <div className="person-voice"><span className={`voice-meter small${voiceDeafened || voiceVolumes[user.name] === 0 ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.peers?.[user.name] || 0)})` }} /></span><input type="range" min="0" max={MAX_VOLUME} step="5" value={voiceVolumes[user.name] ?? DEFAULT_VOLUME} onChange={(event) => setPeerVolume(user.name, event.target.value)} aria-label={`Volume de ${user.name} para você`} /><b>{voiceVolumes[user.name] ?? DEFAULT_VOLUME}%</b></div>}</article>)}</div></section>}
       <section className="panel stage multi-stage"><div className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>
       <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented"><button type="button" className={fps === 30 ? 'selected' : ''} onClick={() => setFps(30)}>30</button><button type="button" className={fps === 60 ? 'selected' : ''} onClick={() => setFps(60)}>60</button></div><p className="hint">É uma preferência. O navegador, a tela e a GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p></fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
     </div>

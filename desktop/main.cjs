@@ -81,6 +81,18 @@ const isTrustedUrl = (value) => {
   try { return new URL(value).origin === APP_ORIGIN } catch { return false }
 }
 
+// The gate between a link somebody typed and the operating system. Parsed rather than pattern-matched,
+// and restricted to the two schemes the web uses: openExternal will happily start whatever program is
+// registered for a scheme, and nothing arriving from another person should be able to do that.
+const WEB_SCHEMES = ['http:', 'https:']
+const openIfWeb = (value) => {
+  let url
+  try { url = new URL(value) } catch { return false }
+  if (!WEB_SCHEMES.includes(url.protocol)) return false
+  shell.openExternal(url.href)
+  return true
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character])
 }
@@ -304,12 +316,20 @@ function createWindow() {
       sandbox: true,
     },
   })
+  // A link in the chat is an ordinary target=_blank anchor. There are no tabs here, so the window it
+  // asks for is refused and the address is handed to the default browser instead -- which is what the
+  // same markup does in a browser tab anyway.
+  //
+  // http as well as https: people paste both, and swallowing one of them silently is worse than opening
+  // it. Everything else is still refused. openExternal hands the address to whatever the system has
+  // registered for that scheme, so file:, and anything a program installed on this machine claimed, must
+  // never reach it -- a message from another person is not allowed to start a program.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://')) shell.openExternal(url)
+    openIfWeb(url)
     return { action: 'deny' }
   })
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!isTrustedUrl(url)) { event.preventDefault(); if (url.startsWith('https://')) shell.openExternal(url) }
+    if (!isTrustedUrl(url)) { event.preventDefault(); openIfWeb(url) }
   })
   mainWindow.webContents.on('render-process-gone', (_event, details) => mediaRuntime.record('renderer-process-gone', details))
   mainWindow.loadURL(APP_URL)

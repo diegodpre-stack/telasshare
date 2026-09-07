@@ -22,7 +22,8 @@ import { createNativeBroadcast, isNativeCaptureAvailable, nativeBitrateKbps, nat
 import { createVoiceChat, isVoiceConnection } from './voiceChat.js'
 import { createVoiceMixer, DEFAULT_VOLUME, MAX_VOLUME } from './voiceMixer.js'
 import { createVoiceInput, MAX_THRESHOLD_DB, MIN_THRESHOLD_DB } from './voiceInput.js'
-import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, HeadphoneOff, Headphones, KeyRound, LogOut, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
+import { splitLinks } from './chatLinks.js'
+import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, HeadphoneOff, Headphones, KeyRound, LogOut, MessageSquare, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Plus, Radio, Send, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
 const defaultSignalHost = localHost ? `${location.hostname}:8787` : location.host
@@ -267,6 +268,48 @@ function RemoteScreen({ screen, name, size, onStop }) {
   </article>
 }
 
+// A message is rendered as pieces, never as markup: splitLinks hands back plain text and addresses it
+// has already vetted, and React escapes the text as it always does. A message cannot introduce HTML.
+//
+// target=_blank sends the click to a new tab in the browser. Inside the app there are no tabs, and the
+// window that opens is intercepted by the desktop shell and handed to the default browser instead --
+// which is the behaviour wanted in both places from the same markup.
+function ChatText({ text }) {
+  return <>{splitLinks(text).map((piece, index) => piece.type === 'link'
+    ? <a key={index} href={piece.href} target="_blank" rel="noopener noreferrer nofollow">{piece.value}</a>
+    : <span key={index}>{piece.value}</span>)}</>
+}
+
+function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose }) {
+  const listRef = useRef(null)
+  const atBottomRef = useRef(true)
+  // Following the conversation should not fight somebody reading back through it, so new messages only
+  // scroll the list when it was already at the bottom.
+  const trackScroll = () => {
+    const list = listRef.current
+    if (list) atBottomRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 60
+  }
+  useEffect(() => {
+    const list = listRef.current
+    if (list && atBottomRef.current) list.scrollTop = list.scrollHeight
+  }, [messages])
+  const submit = (event) => { event.preventDefault(); onSend() }
+  return <section className="panel chat">
+    <div className="panel-heading"><div><p className="eyebrow">Conversa da sala</p><h2>Mensagens</h2></div><button className="chat-close" title="Fechar conversa" onClick={onClose}><X size={16} /></button></div>
+    <div className="chat-list" ref={listRef} onScroll={trackScroll}>
+      {messages.length === 0 && <div className="empty"><MessageSquare size={28} /><strong>Nada por aqui ainda</strong><span>As mensagens somem quando a sala fica vazia.</span></div>}
+      {messages.map((message) => <article className={`chat-message${message.from === selfId ? ' self' : ''}`} key={message.id}>
+        <header><strong>{message.from === selfId ? 'Você' : message.fromName}</strong><time>{new Date(message.at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
+        <p><ChatText text={message.text} /></p>
+      </article>)}
+    </div>
+    <form className="chat-compose" onSubmit={submit}>
+      <input value={draft} onChange={(event) => onDraft(event.target.value)} maxLength={500} placeholder="Escreva uma mensagem" aria-label="Mensagem para a sala" />
+      <button type="submit" disabled={!draft.trim()} title="Enviar"><Send size={16} /></button>
+    </form>
+  </section>
+}
+
 function SelfPreview({ stream, routeLabel, outboundFpsLabel, onClose }) {
   const videoRef = useRef(null)
   const [actualFps, setActualFps] = useState(null)
@@ -361,6 +404,14 @@ export default function App() {
   useEffect(() => { nativeActiveRef.current = nativeActive }, [nativeActive])
   useEffect(() => { broadcastingRef.current = broadcasting }, [broadcasting])
   const [showPeople, setShowPeople] = useState(true)
+  const [showChat, setShowChat] = useState(false)
+  const [messages, setMessages] = useState([])
+  const [chatDraft, setChatDraft] = useState('')
+  const [unreadChat, setUnreadChat] = useState(0)
+  // The socket handler closed over an older render, so whether the panel is open has to travel in a ref
+  // or every message would look unread.
+  const showChatRef = useRef(false)
+  useEffect(() => { showChatRef.current = showChat; if (showChat) setUnreadChat(0) }, [showChat])
   // Voice is entirely separate from the screen: its own connections, its own mixer, its own presence.
   // Nothing below is read by the broadcast path, and nothing here can stop a screen from being shared.
   const [voiceJoined, setVoiceJoined] = useState(false)
@@ -948,6 +999,11 @@ export default function App() {
           setUsers(message.users)
         }
         else if (message.type === 'watch-request') { if (localStreamRef.current) playChime('viewer'); shareWith(message.from, message.mode) }
+        else if (message.type === 'chat-history') setMessages(Array.isArray(message.messages) ? message.messages : [])
+        else if (message.type === 'chat' && message.message?.id) {
+          setMessages((current) => [...current, message.message].slice(-200))
+          if (!showChatRef.current && message.message.from !== selfId) setUnreadChat((current) => current + 1)
+        }
         else if (message.type === 'signal' && message.voice) voiceRef.current?.handleSignal(message)
         else if (message.type === 'signal') { setRemoteScreens((current) => { const next = { ...current }; delete next[`waiting-${message.from}`]; return next }); signalQueueRef.current = signalQueueRef.current.then(() => handleSignal(message)).catch(() => {}) }
         else if (message.type === 'restart-request') { if (isVoiceConnection(message.connectionId)) voiceRef.current?.restart(message.from); else pcsRef.current.get(message.connectionId)?.restart?.() }
@@ -1050,7 +1106,7 @@ export default function App() {
       setCreatingRoom(false); setNewRoomName(''); await loadRooms(); await joinRoom(result.room, newRoomPassword); setNewRoomPassword('')
     } catch (error) { setAccessError(error.message); setJoining(false) }
   }
-  const leaveRoom = () => { stopSharing(false); socketRef.current?.close(); knownUsersRef.current = null; setAccessSession(''); setRoomName(''); setJoined(false); setUsers([]); setRemoteScreens({}); setNotice('Você saiu da sala.') }
+  const leaveRoom = () => { stopSharing(false); socketRef.current?.close(); knownUsersRef.current = null; setAccessSession(''); setRoomName(''); setJoined(false); setUsers([]); setRemoteScreens({}); setMessages([]); setUnreadChat(0); setNotice('Você saiu da sala.') }
   const logoutSite = () => { leaveRoom(); localStorage.removeItem('screen-share-site-session'); setSiteSession(''); setSiteRole('member'); setAccessError('') }
 
   const getCapture = async () => {
@@ -1200,6 +1256,12 @@ export default function App() {
   }
   const watch = (user) => { setRemoteScreens((current) => ({ ...current, [`waiting-${user.id}`]: { peerId: user.id, waiting: true } })); send({ type: 'watch-request', to: user.id, mode: watchMode }); setNotice(`Conectando à tela de ${user.name}…`) }
   const moderate = (user, action) => send({ type: 'moderate', to: user.id, action })
+  const sendChat = () => {
+    const text = chatDraft.trim()
+    if (!text) return
+    send({ type: 'chat', text })
+    setChatDraft('')
+  }
 
   const peers = useMemo(() => users.filter((user) => user.id !== selfId), [users, selfId])
   // Read out of the mixer, which owns and persists them; the revision counter is what says when to look
@@ -1254,10 +1316,11 @@ export default function App() {
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
     <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>
     {nativeAvailable && <label className="size-control">Captura da sua tela<select value={nativeWanted ? 'nativa' : 'navegador'} onChange={(event) => setNativeWanted(event.target.value === 'nativa')} disabled={isBroadcasting}><option value="navegador">Navegador (padrão)</option><option value="nativa">Nativa — experimental</option></select><span>{isBroadcasting ? 'Não muda uma transmissão já iniciada.' : 'A nativa mantém o quadro na placa de vídeo e sustenta 60 FPS em 1440p. O som é o do sistema inteiro, sem o do próprio TelasShare.'}</span></label>}
-    <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><label className="quality-toggle" htmlFor="quality-toggle"><SlidersHorizontal size={16} /><span>Configurar transmissão</span></label></div>
-    <div className={`workspace multi-workspace${showPeople ? '' : ' people-hidden'}`}>
+    <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><button type="button" className={`people-toggle${showChat ? ' active' : ''}`} onClick={() => setShowChat((current) => !current)} aria-expanded={showChat}><MessageSquare size={16} /><span>{showChat ? 'Fechar conversa' : 'Conversa'}</span>{!showChat && unreadChat > 0 && <b className="chat-badge">{unreadChat > 99 ? '99+' : unreadChat}</b>}</button><label className="quality-toggle" htmlFor="quality-toggle"><SlidersHorizontal size={16} /><span>Configurar transmissão</span></label></div>
+    <div className={`workspace multi-workspace${showPeople ? '' : ' people-hidden'}${showChat ? ' with-chat' : ''}`}>
       {showPeople && <section className="panel people"><div className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}{user.voice ? ' · no áudio' : ''}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div>{voiceJoined && user.voice && user.id !== selfId && <div className="person-voice"><span className={`voice-meter small${voiceDeafened || voiceVolumes[user.name] === 0 ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.peers?.[user.name] || 0)})` }} /></span><input type="range" min="0" max={MAX_VOLUME} step="5" value={voiceVolumes[user.name] ?? DEFAULT_VOLUME} onChange={(event) => setPeerVolume(user.name, event.target.value)} aria-label={`Volume de ${user.name} para você`} /><b>{voiceVolumes[user.name] ?? DEFAULT_VOLUME}%</b></div>}</article>)}</div></section>}
       <section className="panel stage multi-stage"><div className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>
+      {showChat && <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} />}
       <aside className="panel settings"><div className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented"><button type="button" className={fps === 30 ? 'selected' : ''} onClick={() => setFps(30)}>30</button><button type="button" className={fps === 60 ? 'selected' : ''} onClick={() => setFps(60)}>60</button></div><p className="hint">É uma preferência. O navegador, a tela e a GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p></fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>
     </div>
   </main>

@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { WebSocketServer, WebSocket } from 'ws'
+import { createRateLimiter } from './rateLimit.js'
 import crypto from 'node:crypto'
 
 const app = express()
@@ -20,6 +21,12 @@ const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_
 const loginAttempts = new Map()
 const rooms = new Map()
 const ROOM_SESSION_MS = 30 * 24 * 60 * 60 * 1000
+// Chat lives and dies with the room, like everything else here: there is no database and the free tier's
+// disk is wiped on every restart anyway, so pretending otherwise would only be a way to lose messages
+// surprisingly instead of predictably. What this buffer buys is that somebody who joins a minute late
+// still sees what was being talked about.
+const CHAT_HISTORY = 100
+const CHAT_MAX_LENGTH = 500
 const TURN_CREDENTIAL_TTL_SECONDS = 60 * 60
 const TURN_USAGE_CACHE_MS = 5 * 60 * 1000
 const TURN_DEFAULT_LIMIT_GB = 800
@@ -104,7 +111,7 @@ app.post('/api/rooms', (req, res) => {
   }
   const key = roomKey(roomName)
   if (rooms.has(key)) return res.status(409).json({ error: 'Não foi possível criar essa sala. Escolha outro nome.' })
-  const room = { id: crypto.randomUUID(), name: roomName, password: password ? hashPassword(password) : null, ownerSub: authenticated.sub, bannedNames: new Set(), createdAt: Date.now(), deleteTimer: null }
+  const room = { id: crypto.randomUUID(), name: roomName, password: password ? hashPassword(password) : null, ownerSub: authenticated.sub, bannedNames: new Set(), messages: [], createdAt: Date.now(), deleteTimer: null }
   rooms.set(key, room)
   scheduleRoomDeletion(room, key)
   res.status(201).json({ room: { id: room.id, name: room.name } })
@@ -225,17 +232,22 @@ const tls = process.env.TLS_CERT_PATH && process.env.TLS_KEY_PATH
 const server = tls ? createHttpsServer(tls, app) : createHttpServer(app)
 const wss = new WebSocketServer({ server, maxPayload: 128 * 1024 })
 const clients = new Map()
-const allowedTypes = new Set(['hello', 'heartbeat', 'broadcast-start', 'broadcast-stop', 'voice-join', 'voice-leave', 'watch-request', 'restart-request', 'moderate', 'signal', 'stop'])
+const allowedTypes = new Set(['hello', 'heartbeat', 'broadcast-start', 'broadcast-stop', 'voice-join', 'voice-leave', 'chat', 'watch-request', 'restart-request', 'moderate', 'signal', 'stop'])
 
 const safeSend = (socket, message) => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }
 const roomClients = (roomId) => [...clients.values()].filter((client) => client.roomId === roomId)
 const publicUsers = (roomId) => roomClients(roomId).map(({ id, name, role, broadcasting, voice }) => ({ id, name, role, broadcasting, voice }))
-const broadcastUsers = (roomId) => {
-  const message = { type: 'users', users: publicUsers(roomId) }
+const sendToRoom = (roomId, message) => {
   for (const { socket } of roomClients(roomId)) safeSend(socket, message)
 }
+const broadcastUsers = (roomId) => sendToRoom(roomId, { type: 'users', users: publicUsers(roomId) })
+// Newlines are kept -- somebody pasting a few lines meant to -- but runs of them are collapsed so a
+// single message cannot scroll everyone else's conversation off the screen.
+const cleanChatText = (value) => typeof value === 'string'
+  ? value.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[^\S\n]+/g, ' ').trim().slice(0, CHAT_MAX_LENGTH)
+  : ''
 const scheduleRoomDeletion = (room, key) => {
   clearTimeout(room.deleteTimer)
   room.deleteTimer = setTimeout(() => {
@@ -255,7 +267,16 @@ wss.on('connection', (socket, request) => {
   if (!authenticated || authenticated.kind !== 'room' || !room || room.id !== authenticated.roomId) { socket.close(1008, 'Entrada na sala necessária'); return }
   const id = authenticated.sub
   let registered = false
+  const limiter = createRateLimiter()
   socket.on('message', (raw) => {
+    // Counted before anything is parsed. A flood of malformed JSON costs the same to receive as a flood
+    // of valid messages, so the ceiling cannot sit behind the parser.
+    const allowed = limiter.accept(raw.length ?? 0)
+    if (!allowed.ok) {
+      if (limiter.flooding) return socket.close(1008, 'Excesso de mensagens')
+      if (limiter.shouldWarn()) safeSend(socket, { type: 'error', message: 'Muitas mensagens de uma vez. Parte delas foi descartada.' })
+      return
+    }
     let message
     try { message = JSON.parse(raw.toString()) } catch { return safeSend(socket, { type: 'error', message: 'Mensagem inválida.' }) }
     if (!isObject(message) || !allowedTypes.has(message.type)) return safeSend(socket, { type: 'error', message: 'Tipo de mensagem inválido.' })
@@ -274,6 +295,8 @@ wss.on('connection', (socket, request) => {
       clearTimeout(room.deleteTimer); room.deleteTimer = null
       registered = true
       safeSend(socket, { type: 'welcome', id, role, roomName: room.name })
+      // Sent to this one socket, not the room: it is what was already said, not something new.
+      safeSend(socket, { type: 'chat-history', messages: room.messages })
       return broadcastUsers(room.id)
     }
     const sender = clients.get(id)
@@ -285,6 +308,23 @@ wss.on('connection', (socket, request) => {
     // to, and it is the same list the interface draws. The audio itself never passes through here.
     if (message.type === 'voice-join') { sender.voice = true; return broadcastUsers(sender.roomId) }
     if (message.type === 'voice-leave') { sender.voice = false; return broadcastUsers(sender.roomId) }
+    if (message.type === 'chat') {
+      const text = cleanChatText(message.text)
+      if (!text) return
+      // Counted after the message is known to be worth sending, not before. Charging for the empty and
+      // malformed ones meant a client sending junk would silently spend the budget of the person typing;
+      // those cost nothing here because the ceiling above already counted them as traffic.
+      //
+      // Refused here is somebody typing quickly, which is worth a word back rather than a strike --
+      // flooding past this costs the connection through that same ceiling anyway.
+      if (!limiter.acceptChat()) return safeSend(socket, { type: 'error', message: 'Devagar com as mensagens.' })
+      // The name is taken from the connection rather than from the message: a sender who could choose
+      // the name shown against their words could put them in somebody else's mouth.
+      const entry = { id: crypto.randomUUID(), from: id, fromName: sender.name, text, at: Date.now() }
+      room.messages.push(entry)
+      if (room.messages.length > CHAT_HISTORY) room.messages.splice(0, room.messages.length - CHAT_HISTORY)
+      return sendToRoom(sender.roomId, { type: 'chat', message: entry })
+    }
     const target = typeof message.to === 'string' ? clients.get(message.to) : null
     if (!target || target.id === id || target.roomId !== sender.roomId) return safeSend(socket, { type: 'error', message: 'Usuário indisponível.' })
 

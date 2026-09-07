@@ -102,3 +102,26 @@
 .voice-auto{display:flex;align-items:center;gap:6px;font-size:10px;color:#8fa2b5;font-weight:700}
 .voice-auto input{accent-color:var(--accent)}
 .voice-sensitivity .hint{flex-basis:100%;margin:0}
+
+/* Chat. It takes the third column and pushes the settings panel to a full-width row underneath --
+   the same shape the layout already collapses to below 1050px, so nothing new has to hold up. */
+.with-chat .settings{grid-column:1/-1}
+.chat{display:flex;flex-direction:column;max-height:min(70vh,620px)}
+.chat .panel-heading{flex:none}
+.chat-close{background:#172638;border:1px solid #304257;color:#b4c1ce;border-radius:9px;padding:7px 9px;display:flex;align-items:center}
+.chat-list{flex:1;overflow-y:auto;overscroll-behavior:contain;padding:0 15px 6px;display:flex;flex-direction:column;gap:11px}
+.chat-list .empty{min-height:150px}
+.chat-message header{display:flex;align-items:baseline;gap:7px;margin-bottom:3px}
+.chat-message strong{font-size:11px;color:#9fd8c6}
+.chat-message.self strong{color:#8ab6e8}
+.chat-message time{font-size:9px;color:#5d7286}
+/* overflow-wrap, because a pasted link with no spaces in it would otherwise widen the whole column. */
+.chat-message p{margin:0;font-size:12px;line-height:1.5;color:#c3d1dd;white-space:pre-wrap;overflow-wrap:anywhere}
+.chat-message a{color:#6fd8f5;text-decoration:underline;text-underline-offset:2px}
+.chat-message a:hover{color:#a8ecff}
+.chat-compose{flex:none;display:flex;gap:7px;padding:12px 15px 15px}
+.chat-compose input{flex:1;min-width:0;background:#0a1724;border:1px solid #2a4056;color:#fff;padding:10px;border-radius:9px;outline:none;font-size:12px}
+.chat-compose input:focus{border-color:#41ca9f;box-shadow:0 0 0 3px #41ca9f1c}
+.chat-compose button{flex:none;border:1px solid #326a5b;background:#13382f;color:#91e6cc;border-radius:9px;padding:0 12px;display:flex;align-items:center}
+.chat-compose button:disabled{opacity:.4}
+.chat-badge{margin-left:6px;background:#ff6871;color:#2a0d10;border-radius:9px;padding:1px 6px;font-size:9px;font-weight:800}

@@ -21,6 +21,7 @@ import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
 import { createNativeBroadcast, isNativeCaptureAvailable, nativeBitrateKbps, nativeIceServers } from './nativeBroadcast.js'
 import { createVoiceChat, isVoiceConnection } from './voiceChat.js'
 import { createVoiceMixer, DEFAULT_VOLUME, MAX_VOLUME } from './voiceMixer.js'
+import { createVoiceInput, MAX_THRESHOLD_DB, MIN_THRESHOLD_DB } from './voiceInput.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, HeadphoneOff, Headphones, KeyRound, LogOut, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Plus, Radio, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -366,13 +367,15 @@ export default function App() {
   const [voiceMuted, setVoiceMuted] = useState(false)
   const [voiceDeafened, setVoiceDeafened] = useState(false)
   const [voiceConnections, setVoiceConnections] = useState([])
-  const [voiceLevels, setVoiceLevels] = useState({ peers: {}, self: 0 })
+  const [voiceLevels, setVoiceLevels] = useState({ peers: {}, self: 0, thresholdLevel: 0, thresholdDb: 0, open: false })
+  const [voiceSensitivity, setVoiceSensitivity] = useState({ auto: true, manualDb: 0 })
   // Bumped whenever a volume changes, so the sliders redraw. The values themselves live in the mixer,
   // which owns them and persists them; duplicating them into React state would give two sources of truth.
   const [voiceRevision, setVoiceRevision] = useState(0)
   const voiceRef = useRef(null)
   const mixerRef = useRef(null)
   const voiceMicRef = useRef(null)
+  const voiceInputRef = useRef(null)
   const voiceJoinedRef = useRef(false)
   // peerId -> name, resolved when a voice stream arrives so the mixer can key volumes by name. Names are
   // unique inside a room and survive a reconnection; peer ids do not.
@@ -475,11 +478,12 @@ export default function App() {
     voiceJoinedRef.current = false
     voiceRef.current?.close(); voiceRef.current = null
     mixerRef.current?.close(); mixerRef.current = null
+    voiceInputRef.current?.close(); voiceInputRef.current = null
     // The microphone light stays on until the track itself is stopped, and leaving voice with it lit is
     // the kind of thing nobody forgives.
     voiceMicRef.current?.getTracks().forEach((track) => track.stop()); voiceMicRef.current = null
     voiceNamesRef.current.clear()
-    setVoiceJoined(false); setVoiceConnections([]); setVoiceLevels({ peers: {}, self: 0 })
+    setVoiceJoined(false); setVoiceConnections([]); setVoiceLevels({ peers: {}, self: 0, thresholdLevel: 0, thresholdDb: 0, open: false })
     setVoiceMuted(false); setVoiceDeafened(false)
     if (notify) send({ type: 'voice-leave' })
   }, [send])
@@ -498,7 +502,11 @@ export default function App() {
       return
     }
     const mixer = createVoiceMixer({ onChange: () => setVoiceRevision((current) => current + 1) })
-    mixer.useMicrophone(microphone)
+    // The raw microphone is never what peers receive. It goes through the gate first, and the processed
+    // stream is what the connections and the mute switch are given.
+    const input = createVoiceInput({ stream: microphone })
+    input.start()
+    mixer.useMicrophone(input.stream)
     // Clicking the button is the gesture browsers wait for, so this is the moment the context can start.
     try { await mixer.resume() } catch { /* a context that will not start still lets the microphone send */ }
     const voice = createVoiceChat({
@@ -519,8 +527,9 @@ export default function App() {
       },
       onStateChange: () => setVoiceConnections(voiceRef.current?.connections || []),
     })
-    voice.setLocalStream(microphone)
-    mixerRef.current = mixer; voiceRef.current = voice; voiceMicRef.current = microphone
+    voice.setLocalStream(input.stream)
+    mixerRef.current = mixer; voiceRef.current = voice; voiceMicRef.current = microphone; voiceInputRef.current = input
+    setVoiceSensitivity({ auto: input.auto, manualDb: input.manualThresholdDb })
     voiceJoinedRef.current = true
     setVoiceJoined(true); setVoiceMuted(false); setVoiceDeafened(false)
     send({ type: 'voice-join' })
@@ -540,7 +549,9 @@ export default function App() {
     if (!voiceJoined || !showPeople) return
     const timer = setInterval(() => {
       const mixer = mixerRef.current
-      if (mixer) setVoiceLevels({ peers: mixer.levels(), self: mixer.micLevel() })
+      const input = voiceInputRef.current
+      if (!mixer || !input) return
+      setVoiceLevels({ peers: mixer.levels(), self: input.level, thresholdLevel: input.thresholdLevel, thresholdDb: input.thresholdDb, open: input.open })
     }, 160)
     return () => clearInterval(timer)
   }, [voiceJoined, showPeople])
@@ -561,6 +572,11 @@ export default function App() {
     setVoiceDeafened(mixer.setDeafened(next))
   }
   const setPeerVolume = (name, value) => mixerRef.current?.setVolume(name, value)
+  // The control from the Discord screenshot: below this level nothing is sent at all, which is what
+  // actually stops a keyboard. Automatic reads the room's own quiet and sits just above it.
+  const readSensitivity = (input) => setVoiceSensitivity({ auto: input.auto, manualDb: input.manualThresholdDb })
+  const setVoiceAuto = (value) => { const input = voiceInputRef.current; if (input) { input.setAuto(value); readSensitivity(input) } }
+  const setVoiceThreshold = (value) => { const input = voiceInputRef.current; if (input) { input.setThreshold(value); readSensitivity(input) } }
 
   // One sweep across every peer we are transmitting to, only while the preview panel that shows the
   // result is open. Closing it stops the sampling; the numbers resume from the next sweep.
@@ -1223,7 +1239,7 @@ export default function App() {
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
     <section className="voice-bar" aria-label="Áudio da sala">{!voiceJoined
       ? <button type="button" className="voice-join" onClick={joinVoice}><PhoneCall size={17} /><span><strong>Entrar no áudio</strong><small>{users.filter((user) => user.voice).length ? `${users.filter((user) => user.voice).length} na conversa agora` : 'ninguém na conversa ainda'}</small></span></button>
-      : <><div className="voice-self"><span className={`voice-meter${voiceMuted ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.self || 0)})` }} /></span><div><strong>Você está no áudio</strong><small>{voiceStatus}</small></div></div><div className="voice-actions"><button type="button" className={voiceMuted ? 'off' : ''} onClick={toggleMute} aria-pressed={voiceMuted}>{voiceMuted ? <MicOff size={16} /> : <Mic size={16} />}{voiceMuted ? 'Microfone desligado' : 'Microfone ligado'}</button><button type="button" className={voiceDeafened ? 'off' : ''} onClick={toggleDeafen} aria-pressed={voiceDeafened}>{voiceDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}{voiceDeafened ? 'Não está ouvindo' : 'Ouvindo todos'}</button><button type="button" className="leave-voice" onClick={() => leaveVoice(true)}><PhoneOff size={16} />Sair do áudio</button></div></>}</section>
+      : <><div className="voice-self"><span className={`voice-meter input${voiceMuted ? ' silent' : voiceLevels.open ? ' open' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.self || 0)})` }} /><b style={{ left: `${Math.round((voiceLevels.thresholdLevel || 0) * 100)}%` }} /></span><div><strong>Você está no áudio</strong><small>{voiceMuted ? 'microfone desligado' : voiceStatus}</small></div></div><div className="voice-actions"><button type="button" className={voiceMuted ? 'off' : ''} onClick={toggleMute} aria-pressed={voiceMuted}>{voiceMuted ? <MicOff size={16} /> : <Mic size={16} />}{voiceMuted ? 'Microfone desligado' : 'Microfone ligado'}</button><button type="button" className={voiceDeafened ? 'off' : ''} onClick={toggleDeafen} aria-pressed={voiceDeafened}>{voiceDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}{voiceDeafened ? 'Não está ouvindo' : 'Ouvindo todos'}</button><button type="button" className="leave-voice" onClick={() => leaveVoice(true)}><PhoneOff size={16} />Sair do áudio</button></div><div className="voice-sensitivity"><label className="voice-auto"><input type="checkbox" checked={voiceSensitivity.auto} onChange={(event) => setVoiceAuto(event.target.checked)} />Ajustar a sensibilidade automaticamente</label><input type="range" min={MIN_THRESHOLD_DB} max={MAX_THRESHOLD_DB} step="1" value={voiceSensitivity.auto ? Math.round(voiceLevels.thresholdDb || MIN_THRESHOLD_DB) : voiceSensitivity.manualDb} disabled={voiceSensitivity.auto} onChange={(event) => setVoiceThreshold(event.target.value)} aria-label="Sensibilidade do microfone" /><span>{voiceSensitivity.auto ? `${Math.round(voiceLevels.thresholdDb || 0)} dB · automático` : `${voiceSensitivity.manualDb} dB`}</span><p className="hint">Abaixo desse nível nada é enviado. É o que segura teclado e batida na mesa enquanto você não está falando — fale normalmente e veja onde a barra chega.</p></div></>}</section>
     <input className="quality-toggle-check" id="quality-toggle" type="checkbox" />
     <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>
     {nativeAvailable && <label className="size-control">Captura da sua tela<select value={nativeWanted ? 'nativa' : 'navegador'} onChange={(event) => setNativeWanted(event.target.value === 'nativa')} disabled={isBroadcasting}><option value="navegador">Navegador (padrão)</option><option value="nativa">Nativa — experimental</option></select><span>{isBroadcasting ? 'Não muda uma transmissão já iniciada.' : 'A nativa mantém o quadro na placa de vídeo e sustenta 60 FPS em 1440p. O som é o do sistema inteiro, sem o do próprio TelasShare.'}</span></label>}

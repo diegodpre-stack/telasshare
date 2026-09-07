@@ -74,6 +74,7 @@ assert.equal(mixer.getVolume('Bruno'), 130, 'and everyone else comes back as the
 
 // --- the microphone -------------------------------------------------------
 // Muting has to stop the track itself: a muted track sends nothing, so nobody has to be trusted with it.
+// The stream here is the processed one from voiceInput, so muting reaches what peers actually receive.
 const microphone = { enabled: true }
 mixer.useMicrophone(streamWith(microphone))
 mixer.setMuted(true)

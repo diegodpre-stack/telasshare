@@ -90,3 +90,15 @@
 .person-voice{grid-column:1/-1;display:flex;align-items:center;gap:9px;padding:2px 2px 0}
 .person-voice input[type=range]{flex:1;accent-color:var(--accent);height:4px}
 .person-voice b{font-size:9px;color:#7f93a6;font-weight:700;min-width:34px;text-align:right}
+/* The input meter carries a marker at the threshold, so the slider is set by looking rather than guessing. */
+.voice-meter{position:relative}
+.voice-meter.input i{background:#3c4b5c}
+.voice-meter.input.open i{background:var(--accent)}
+.voice-meter.input b{position:absolute;top:-3px;bottom:-3px;width:2px;background:#ffd479;border-radius:2px;margin-left:-1px}
+.voice-sensitivity{flex-basis:100%;display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding-top:9px;border-top:1px solid #16283a}
+.voice-sensitivity input[type=range]{flex:1;min-width:140px;accent-color:var(--accent);height:4px}
+.voice-sensitivity input[type=range]:disabled{accent-color:#3c4b5c}
+.voice-sensitivity>span{font-size:9px;color:#7f93a6;font-weight:700;min-width:96px;text-align:right}
+.voice-auto{display:flex;align-items:center;gap:6px;font-size:10px;color:#8fa2b5;font-weight:700}
+.voice-auto input{accent-color:var(--accent)}
+.voice-sensitivity .hint{flex-basis:100%;margin:0}

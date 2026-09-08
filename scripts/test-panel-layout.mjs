@@ -141,7 +141,11 @@ for (const name of ['panel', 'resizable']) {
   assert.ok(source.includes(`panel ${name === 'panel' ? '' : name}`.trim()), `App.jsx must emit the ${name} class`)
 }
 assert.ok(/className: `panel resizable /.test(source), 'every panel is built with the class its resize rule needs')
-assert.ok(/\.panel\.resizable\{[^}]*resize:vertical/.test(css), 'and that class is what carries the vertical resize')
+// One grip, dragging both ways. Two of them -- the column horizontal, the panel vertical -- sat a few
+// pixels apart in the same corner, and which one the pointer caught was luck: you could widen or you
+// could heighten and never both, which read as the resize being broken.
+assert.ok(/\.panel\.resizable\{[^}]*resize:both/.test(css), 'the panel resizes in both directions')
+assert.ok(!/\.panel-column[^{]*\{[^}]*resize:\s*(both|horizontal|vertical)/.test(css), 'and no column rule opens a grip of its own to compete with it')
 // The picture panel has to be able to scroll, or a stretched live sits outside it with its own grip
 // out of reach and no way back.
 assert.ok(/\.panel\.stage\{[^}]*display:flex/.test(css), 'the stage panel is a column')

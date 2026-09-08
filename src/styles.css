@@ -125,14 +125,14 @@
    only ever put things side by side, so a narrow panel next to a tall one wasted the whole height
    beside it. The column carries the width, since everything stacked in it has to share one. */
 .workspace.panels{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px}
-.panel-column{display:flex;flex-direction:column;gap:14px;flex:0 0 auto;width:300px;min-width:200px;max-width:900px;overflow:hidden;resize:horizontal}
+.panel-column{display:flex;flex-direction:column;gap:14px;flex:0 0 auto;width:300px;min-width:200px;max-width:900px;overflow:hidden}
 /* The column holding the picture takes what the others leave rather than a width of its own. */
 .panel-column:has(>.panel.stage){flex:1 1 460px;width:auto;min-width:360px;max-width:none;resize:none}
-.panel.resizable{width:auto;overflow:hidden;resize:vertical;min-height:160px}
+.panel.resizable{width:auto;overflow:hidden;resize:both;min-height:160px;min-width:200px;max-width:900px}
 .panel.people{height:460px}
 .panel.chat{height:520px;max-height:none}
-.panel.stage{height:620px;display:flex;flex-direction:column}
-.panel.settings{height:auto;resize:vertical}
+.panel.stage{height:620px;display:flex;flex-direction:column;min-width:360px;max-width:2400px}
+.panel.settings{height:auto}
 .panel.people,.panel.chat{display:flex;flex-direction:column}
 .panel.people .people-list{flex:1;overflow-y:auto}
 .panel.stage>.panel-heading{flex:none}

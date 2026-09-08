@@ -598,8 +598,42 @@ export default function App() {
   // resize handle writes to the same style attribute, so a width in the render tree would be overwritten
   // by the drag and then put back on the next render, and the panel would fight the person dragging it.
   // React owns the order; the DOM owns the size; the module owns what is remembered.
+  //
+  // One grip per panel, dragging both ways at once. It used to be two: the column carried `resize:
+  // horizontal` and the panel `resize: vertical`, so the two grips sat a few pixels apart in the same
+  // corner and which one you caught was luck. You could widen or you could heighten, never both, and it
+  // looked broken because it was.
+  //
+  // The width still belongs to the column -- panels stacked in one have to be equally wide -- so a drag
+  // is read off the panel and applied to the column and to its siblings. The panel being dragged is
+  // never written to: that is what would fight the pointer.
   const observersRef = useRef(new Map())
   const panelRefsRef = useRef(new Map())
+  const columnRefsRef = useRef(new Map())
+  const columnNodesRef = useRef(new Map())
+  const panelNodesRef = useRef(new Map())
+
+  const columnOf = (id) => layoutRef.current.columns.find((column) => column.includes(id)) || []
+  const applyWidth = (id, width) => {
+    const column = columnOf(id)
+    const lead = column[0]
+    if (!lead) return
+    layoutRef.current.resize(lead, { width })
+    const columnNode = columnNodesRef.current.get(lead)
+    if (columnNode) {
+      columnNode.style.width = `${width}px`
+      // The picture's column is told to take whatever the others leave, which would swallow a width
+      // chosen by hand. Once somebody has chosen one, it stops growing on its own.
+      columnNode.style.flex = '0 0 auto'
+    }
+    // Siblings follow; the one under the pointer is left alone.
+    for (const other of column) {
+      if (other === id) continue
+      const node = panelNodesRef.current.get(other)
+      if (node) node.style.width = `${width}px`
+    }
+  }
+
   // Built once per panel and kept. A fresh callback each render would make React detach and reattach the
   // element every time, which tears down the observer mid-drag and loses the size being dragged to.
   const panelRef = (id) => {
@@ -607,16 +641,20 @@ export default function App() {
       panelRefsRef.current.set(id, (node) => {
         const existing = observersRef.current.get(id)
         if (existing) { existing.observer.disconnect(); observersRef.current.delete(id) }
-        if (!node) return
-        // Height only: the width belongs to the column, since everything stacked in one has to be as
-        // wide as the column is.
+        if (!node) { panelNodesRef.current.delete(id); return }
+        panelNodesRef.current.set(id, node)
+        // Its own height, and the width of the column it sits in.
         const size = layoutRef.current.sizeOf(id)
         if (size.height) node.style.height = `${size.height}px`
+        const columnWidth = layoutRef.current.sizeOf(columnOf(id)[0] || id).width
+        if (columnWidth) node.style.width = `${columnWidth}px`
         if (typeof ResizeObserver === 'undefined') return
         // Fires on every pixel of a drag. The module ignores a size it already has, so the write and the
         // redraw only happen when the number actually changed.
         const observer = new ResizeObserver(() => {
-          if (node.isConnected) layoutRef.current.resize(id, { height: node.offsetHeight })
+          if (!node.isConnected) return
+          layoutRef.current.resize(id, { height: node.offsetHeight })
+          applyWidth(id, node.offsetWidth)
         })
         observer.observe(node)
         observersRef.current.set(id, { node, observer })
@@ -624,24 +662,16 @@ export default function App() {
     }
     return panelRefsRef.current.get(id)
   }
-  // The column carries the width, taken from whichever panel leads it. Dragging the column sideways is
-  // what widens everything stacked inside, which is the only arrangement that makes sense once panels
-  // can sit on top of one another.
-  const columnRefsRef = useRef(new Map())
+
+  // The column no longer carries a grip of its own; it only holds the width a panel was dragged to, so
+  // that everything stacked inside it lines up.
   const columnRef = (leadId) => {
     if (!columnRefsRef.current.has(leadId)) {
       columnRefsRef.current.set(leadId, (node) => {
-        const existing = observersRef.current.get(`column:${leadId}`)
-        if (existing) { existing.observer.disconnect(); observersRef.current.delete(`column:${leadId}`) }
-        if (!node) return
+        if (!node) { columnNodesRef.current.delete(leadId); return }
+        columnNodesRef.current.set(leadId, node)
         const size = layoutRef.current.sizeOf(leadId)
         if (size.width) node.style.width = `${size.width}px`
-        if (typeof ResizeObserver === 'undefined') return
-        const observer = new ResizeObserver(() => {
-          if (node.isConnected) layoutRef.current.resize(leadId, { width: node.offsetWidth })
-        })
-        observer.observe(node)
-        observersRef.current.set(`column:${leadId}`, { node, observer })
       })
     }
     return columnRefsRef.current.get(leadId)
@@ -684,7 +714,8 @@ export default function App() {
   // The sizes live on the elements rather than in the render tree, so forgetting them is not enough --
   // they have to be taken off the elements too, or restoring would only take effect on the next reload.
   const resetLayout = () => {
-    for (const { node } of observersRef.current.values()) { node.style.width = ''; node.style.height = '' }
+    for (const node of panelNodesRef.current.values()) { node.style.width = ''; node.style.height = '' }
+    for (const node of columnNodesRef.current.values()) { node.style.width = ''; node.style.flex = '' }
     layoutRef.current.reset()
   }
 

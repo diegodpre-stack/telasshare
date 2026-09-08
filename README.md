@@ -1,14 +1,18 @@
 # TelasShare — compartilhamento privado de tela
 
-Compartilhamento privado de tela entre amigos. Transmitir exige clique explícito e escolha manual da tela. O projeto não oferece controle remoto, clipboard, arquivos nem captura silenciosa.
+Compartilhamento privado de tela entre amigos, com voz, conversa e envio de arquivos dentro da sala. Transmitir exige clique explícito e escolha manual da tela. O projeto não oferece controle remoto, clipboard nem captura silenciosa.
 
 O aplicativo aceita várias transmissões simultâneas: uma tela pode ser enviada para vários amigos, cada pessoa pode transmitir enquanto assiste outras telas, e o painel oferece tamanhos Pequeno, Médio e Grande, além de tela cheia por transmissão.
 
 O áudio depende da origem e do navegador: uma aba pode fornecer apenas o próprio som; uma tela inteira pode fornecer o áudio do sistema; e, para janelas, o aplicativo solicita áudio somente da janela quando o navegador oferece esse recurso. Avisos de captura exibidos pelo navegador são controles de segurança e não podem ser ocultados pelo site. A sinalização mantém o SDP nativo para compatibilidade entre Chrome e Firefox e tenta reiniciar o ICE quando uma conexão em andamento perde a rota de rede.
 
-O cliente envia um heartbeat de sinalização a cada 20 segundos. Se o WebSocket cair por oscilação de rede ou substituição da instância no Render, ele reconecta com espera progressiva sem encerrar imediatamente as tracks e conexões WebRTC. O identificador da sessão permanece estável durante a reconexão, permitindo que a negociação e a recuperação do ICE continuem.
+O cliente envia um heartbeat de sinalização a cada 20 segundos. Se o WebSocket cair por oscilação de rede ou reinício do servidor, ele reconecta com espera progressiva sem encerrar imediatamente as tracks e conexões WebRTC. O identificador da sessão permanece estável durante a reconexão, permitindo que a negociação e a recuperação do ICE continuem.
 
-Usuários comuns entram no site apenas escolhendo um nome. O lobby atualiza automaticamente e mostra somente os nomes das salas disponíveis; participantes, presença, transmissões e sinalização WebRTC só ficam disponíveis após a senha da sala ser validada. Salas que permanecem vazias por 15 segundos são removidas. Dentro dela, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores.
+Usuários comuns entram no site apenas escolhendo um nome. O lobby atualiza automaticamente e mostra somente os nomes das salas disponíveis; participantes, presença, transmissões e sinalização WebRTC só ficam disponíveis após a senha da sala ser validada. Dentro dela, a pessoa inicia a própria tela uma vez e qualquer participante pode clicar em **Assistir**, sem novo pedido de autorização. Não há limite artificial de participantes; a capacidade prática depende da conexão e da máquina dos transmissores.
+
+Uma sala pode ser **temporária** ou **permanente**. A temporária vive só na memória e desaparece 15 segundos depois que a última pessoa sai, que era o único comportamento das versões anteriores. A permanente guarda a conversa e os arquivos, e continua existindo entre um encontro e outro.
+
+Dentro da sala há também **voz** e **conversa por texto**, cada uma no seu painel. Os painéis podem ser redimensionados e arrastados para onde a pessoa preferir, empilhados em colunas, e a disposição escolhida fica salva naquele navegador.
 
 ## Requisitos
 
@@ -142,16 +146,38 @@ Para conferir, use uma transmissão com movimento na tela e olhe **Implementaç�
 
 ### Salas privadas
 
-O Blueprint gera `SESSION_SECRET` automaticamente. Não existe senha geral para usuários comuns: basta escolher um nome. Depois desse login, o lobby mostra os nomes das salas, mas não mostra participantes nem transmissões. Qualquer usuário pode criar uma sala e escolher sua senha; os amigos clicam nela e informam essa senha para entrar. O login fica salvo no navegador por até 30 dias. O servidor limita tentativas de login incorretas e não permite dois usuários com o mesmo nome dentro da mesma sala.
+Não existe senha geral para usuários comuns: basta escolher um nome. Depois desse login, o lobby mostra os nomes das salas, mas não mostra participantes nem transmissões. Qualquer usuário pode criar uma sala e escolher sua senha; os amigos clicam nela e informam essa senha para entrar. O login fica salvo no navegador por até 30 dias. O servidor recusa novas tentativas após dez erros vindos do mesmo endereço em dez minutos, e não permite dois usuários com o mesmo nome dentro da mesma sala.
 
-As salas ficam somente na memória nesta versão. Se o Render reiniciar ou adormecer o serviço gratuito, elas desaparecem e precisam ser criadas novamente; a interface descartará a sessão antiga na próxima tentativa. As senhas são armazenadas em memória com `scrypt`, salt individual e nunca são enviadas para outros participantes.
+As senhas são guardadas com `scrypt` e salt individual, e nunca são enviadas a outros participantes.
+
+Sair de uma sala não obriga a digitar a senha de novo ao voltar. O que fica guardado é a sessão que o servidor emitiu quando a senha foi aceita, presa àquela sala e àquele navegador -- ela não vale em outro computador nem no aplicativo, onde a senha é pedida uma vez. Sair do site descarta todas elas.
+
+#### Quem manda na sala
+
+Quem cria é o dono, e só ele apaga na hora. O dono pode nomear co-donos, que conseguem apenas iniciar uma contagem de três dias, que o dono cancela até o fim do prazo. Apagar exige a senha da sala além da posse: sem contas, um nome é só um nome, e destruir não é o menor dos atos.
+
+A posse é reconhecida por sessão **ou** por nome, de modo que a mesma pessoa em outro computador continua sendo dona. É uma troca deliberada, e a razão de a senha ser pedida de qualquer forma.
+
+Uma sala permanente que passe sessenta dias sem ninguém entrar é apagada. Qualquer visita zera essa contagem, não só a do dono.
+
+#### Arquivos e fotos
+
+Dentro de uma sala permanente é possível enviar arquivos, que aparecem na conversa. Ficam no disco do servidor, em uma pasta por sala, e vão embora junto com a sala.
+
+O tipo é lido dos bytes e não do nome: apenas uma lista curta de formatos é exibida na própria página, e todo o resto -- um SVG inclusive, porque SVG carrega script -- é entregue como download. Os endereços são assinados e de prazo curto, porque uma tag `<img>` não consegue enviar cabeçalho de autorização e um link que nunca expira é um link que vaza uma vez e serve para sempre.
+
+#### Voz
+
+A voz usa uma conexão de áudio separada por par, com Opus e DTX. Há silenciar, ensurdecer e volume individual de cada pessoa, de 0 a 200%.
+
+O microfone passa por um portão que decide o que é fala pela variação do sinal, e não pelo volume: um ventilador constante logo acima do limite não o abre, enquanto uma voz abre. Há também supressão de ruído por RNNoise, que roda no próprio navegador.
 
 Nunca coloque `SESSION_SECRET` nem o arquivo `.env` no Git.
 
 1. Publique o frontend com HTTPS e defina `VITE_SIGNAL_URL=wss://seu-dominio-de-sinalizacao` antes de `npm run build`.
 2. Publique o servidor Node em uma hospedagem que aceite WebSocket e configure `CLIENT_ORIGIN=https://seu-frontend`.
 3. Use HTTPS/WSS com certificado válido (`TLS_CERT_PATH` e `TLS_KEY_PATH` quando o TLS terminar no próprio Node; deixe vazios quando um proxy como Caddy/Nginx fizer a terminação TLS).
-4. Para usar o Cloudflare Realtime TURN como fallback protegido por limite mensal, crie uma chave TURN e um token de API com permissão de leitura `Account Analytics`. Adicione estas variáveis secretas no backend/Render:
+4. Para usar o Cloudflare Realtime TURN como fallback protegido por limite mensal, crie uma chave TURN e um token de API com permissão de leitura `Account Analytics`. Adicione estas variáveis ao `.env` do servidor:
 
 ```dotenv
 CLOUDFLARE_TURN_KEY_ID=id-da-chave-turn
@@ -166,7 +192,9 @@ O fallback pode ser desligado sem remover nenhuma credencial definindo `TURN_ENA
 
 Antes de fornecer qualquer credencial, o backend consulta na própria Cloudflare a saída mensal da chave TURN. Ao atingir 800 GB, ele bloqueia novas credenciais; os clientes também verificam o estado a cada cinco minutos e encerram conexões auxiliares ativas. A margem de 200 GB cobre atraso de métricas e tráfego ainda em andamento. Se a consulta falhar ou alguma variável de proteção estiver ausente, o sistema falha de forma segura e fornece somente STUN/P2P. O limite é uma proteção conservadora do aplicativo, mas a medição da Cloudflare não deve ser tratada como um teto financeiro contratual absoluto.
 
-As credenciais temporárias duram uma hora e a chave permanente nunca é enviada ao navegador. O WebRTC mantém `iceTransportPolicy: all`: tenta conexão direta P2P e usa o TURN somente quando necessário. P2P permanece disponível mesmo quando o TURN é bloqueado.
+As credenciais temporárias duram uma hora e a chave permanente nunca é enviada ao navegador. Por padrão o WebRTC tenta a conexão direta e recorre ao TURN só quando ela falha, e o P2P continua disponível mesmo com o TURN bloqueado. Antes de clicar em **Assistir** é possível escolher entre **Automático**, **Somente P2P** e **Somente TURN**.
+
+Vale saber o que a escolha significa para a privacidade: em P2P os dois lados enxergam o endereço IP um do outro, o que é inerente a uma conexão direta. Com **Somente TURN**, cada lado vê apenas o endereço do relay da Cloudflare, em troca de latência um pouco maior e de consumo da franquia mensal. A etiqueta de cada transmissão diz qual rota está em uso, e quando não é possível determiná-la ela não diz nada em vez de supor.
 
 As variáveis `VITE_TURN_*` permanecem disponíveis exclusivamente para testes locais com outro provedor. Elas ficam embutidas no frontend e nunca devem receber uma chave permanente de produção.
 
@@ -198,4 +226,9 @@ No caminho do navegador não há escolha de bitrate. O teto é de 20 Mbps por es
 - Nenhuma mensagem remota consegue chamar `getDisplayMedia`; isso só ocorre no clique **Iniciar transmissão** do transmissor.
 - Ao parar, fechar a aba, perder o peer ou encerrar a captura nativa, tracks e `RTCPeerConnection` são fechados.
 - Cada espectador usa uma conexão WebRTC independente. A banda de upload do transmissor cresce aproximadamente uma vez por espectador; para grupos grandes, a evolução recomendada é usar uma SFU.
-- Para uso público real, adicione contas persistentes, banco de dados e recuperação de salas.
+- Não há contas: a identidade é o nome digitado, e é a senha da sala que protege o acesso.
+- Envios são limitados por arquivo e por sala, e o tamanho é conferido enquanto os bytes chegam, não depois.
+- Cada conexão tem um orçamento de mensagens e de bytes; quem passa dele é desconectado sem afetar a sala.
+- O endereço IP de quem se conecta serve apenas para limitar tentativas de login, fica em memória e nunca é enviado a outro participante.
+- O painel de diagnóstico nunca mostra endereços de candidatos, URLs de servidores ou credenciais.
+- Para uso público real, o próximo passo seria contas de verdade com senha.

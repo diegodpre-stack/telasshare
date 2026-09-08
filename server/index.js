@@ -284,7 +284,7 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
 // and short-lived rather than a plain identifier: a link that never expires is a link that leaks once
 // and works forever. Minted when a message is handed over, so a session's links stay usable while the
 // session lasts and are useless to anybody who copies one out of it a day later.
-const FILE_LINK_MS = 6 * 60 * 60 * 1000
+const FILE_LINK_MS = Number(process.env.FILE_LINK_MS) || 6 * 60 * 60 * 1000
 const fileUrl = (id) => `/api/files/${id}?token=${encodeURIComponent(signSession({ kind: 'file', file: id, exp: Date.now() + FILE_LINK_MS }))}`
 // Messages travel with their file's address attached, so nothing has to be asked for separately.
 const withLinks = (message) => (message.file ? { ...message, file: { ...message.file, url: fileUrl(message.file.id) } } : message)
@@ -520,7 +520,7 @@ const tls = process.env.TLS_CERT_PATH && process.env.TLS_KEY_PATH
 const server = tls ? createHttpsServer(tls, app) : createHttpServer(app)
 const wss = new WebSocketServer({ server, maxPayload: 128 * 1024 })
 const clients = new Map()
-const allowedTypes = new Set(['hello', 'heartbeat', 'broadcast-start', 'broadcast-stop', 'voice-join', 'voice-leave', 'chat', 'watch-request', 'restart-request', 'moderate', 'promote', 'demote', 'signal', 'stop'])
+const allowedTypes = new Set(['hello', 'heartbeat', 'history', 'broadcast-start', 'broadcast-stop', 'voice-join', 'voice-leave', 'chat', 'watch-request', 'restart-request', 'moderate', 'promote', 'demote', 'signal', 'stop'])
 
 const safeSend = (socket, message) => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
@@ -599,6 +599,17 @@ wss.on('connection', (socket, request) => {
     const sender = clients.get(id)
     if (!sender || sender.socket !== socket) return socket.close(1012, 'Conexão substituída')
     if (message.type === 'heartbeat') return safeSend(socket, { type: 'heartbeat', at: Date.now() })
+    // A file address carries its own permission and that permission expires, so a tab left open long
+    // enough ends up holding links that no longer work. Rather than making people reload, the page asks
+    // for the conversation again and the links are minted fresh on the way out. Nothing new is granted:
+    // this is the same history this socket was already sent on joining.
+    if (message.type === 'history') {
+      // Only the addresses, not the conversation. Sending the history again would replace what the page
+      // is showing, and the page keeps more of it than the server does -- so a renewal would silently
+      // shorten the conversation somebody was reading.
+      const links = room.messages.filter((entry) => entry.file).map((entry) => ({ id: entry.id, url: fileUrl(entry.file.id) }))
+      return safeSend(socket, { type: 'chat-links', links })
+    }
     if (message.type === 'broadcast-start') { sender.broadcasting = true; return broadcastUsers(sender.roomId) }
     if (message.type === 'broadcast-stop') { sender.broadcasting = false; return broadcastUsers(sender.roomId) }
     // Who is in voice is presence, not signalling: every peer needs it to know whom to open a connection

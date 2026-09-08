@@ -293,16 +293,28 @@ const readableSize = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed
 // A picture is shown; anything else is a link to save. Which of the two it is was decided by the server
 // from the file's own bytes, never from its name -- an SVG or an HTML file arrives here as something to
 // download precisely so it is never rendered on this page.
-function ChatFile({ file }) {
+// `onStale` asks the server for the conversation again, which is how a file address that has outlived
+// its signature comes back to life. A picture repairs itself the moment it fails to load; a file being
+// downloaded is checked first, because sending somebody to a page reading "Link expirado." when the fix
+// takes half a second and no decision from them is a bad way to answer a click.
+function ChatFile({ file, onStale }) {
   if (file.inline && file.kind.startsWith('image/')) {
-    return <a className="chat-image" href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} loading="lazy" /></a>
+    return <a className="chat-image" href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} loading="lazy" onError={onStale} /></a>
   }
-  if (file.inline && file.kind.startsWith('video/')) return <video className="chat-video" src={file.url} controls preload="metadata" />
-  if (file.inline && file.kind.startsWith('audio/')) return <audio src={file.url} controls preload="metadata" />
-  return <a className="chat-file" href={file.url} target="_blank" rel="noopener noreferrer" download={file.name}><Paperclip size={15} /><span><strong>{file.name}</strong><small>{readableSize(file.bytes)}</small></span></a>
+  if (file.inline && file.kind.startsWith('video/')) return <video className="chat-video" src={file.url} controls preload="metadata" onError={onStale} />
+  if (file.inline && file.kind.startsWith('audio/')) return <audio src={file.url} controls preload="metadata" onError={onStale} />
+  const open = async (event) => {
+    event.preventDefault()
+    // HEAD rather than GET: the answer needed is only whether the address still opens, and fetching the
+    // file twice to find out would be worse than the problem.
+    const usable = await fetch(file.url, { method: 'HEAD' }).then((response) => response.ok).catch(() => false)
+    if (usable) { window.open(file.url, '_blank', 'noopener'); return }
+    onStale?.()
+  }
+  return <a className="chat-file" href={file.url} target="_blank" rel="noopener noreferrer" download={file.name} onClick={open}><Paperclip size={15} /><span><strong>{file.name}</strong><small>{readableSize(file.bytes)}</small></span></a>
 }
 
-function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel, onUpload, uploading, canUpload }) {
+function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel, onUpload, uploading, canUpload, onStale }) {
   const listRef = useRef(null)
   const atBottomRef = useRef(true)
   // Following the conversation should not fight somebody reading back through it, so new messages only
@@ -322,7 +334,7 @@ function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel, o
       {messages.length === 0 && <div className="empty"><MessageSquare size={28} /><strong>Nada por aqui ainda</strong><span>As mensagens somem quando a sala fica vazia.</span></div>}
       {messages.map((message) => <article className={`chat-message${message.from === selfId ? ' self' : ''}`} key={message.id}>
         <header><strong>{message.from === selfId ? 'Você' : message.fromName}</strong><time>{new Date(message.at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
-        {message.file && <ChatFile file={message.file} />}
+        {message.file && <ChatFile file={message.file} onStale={onStale} />}
         {message.text ? <p><ChatText text={message.text} /></p> : null}
       </article>)}
     </div>
@@ -512,6 +524,15 @@ export default function App() {
     })
   }, [fps, resolution, readTransmissionSettings])
   const send = useCallback((message) => { if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message)) }, [])
+  // Asking for the conversation again, which is how an expired file address repairs itself. Coalesced,
+  // because a conversation with twenty stale photos produces twenty errors in the same instant and they
+  // all want the identical answer.
+  const lastRefresh = useRef(0)
+  const refreshLinks = useCallback(() => {
+    if (Date.now() - lastRefresh.current < 30_000) return
+    lastRefresh.current = Date.now()
+    send({ type: 'history' })
+  }, [send])
 
   // Everything one panel needs to be sized, remembered and moved.
   //
@@ -611,6 +632,22 @@ export default function App() {
 
   useEffect(() => { isNativeCaptureAvailable().then(setNativeAvailable).catch(() => setNativeAvailable(false)) }, [])
   useEffect(() => { localStorage.setItem('entretelas-captura-nativa', nativeWanted ? '1' : '0') }, [nativeWanted])
+
+  // A tab left open outlives the addresses inside it. Renewing when somebody comes back to the window
+  // means the repair almost always happens before anything looks broken, and the failure handlers below
+  // are only there for the case it does not.
+  useEffect(() => {
+    if (!joined) return undefined
+    const renew = () => { if (document.visibilityState === 'visible') refreshLinks() }
+    window.addEventListener('focus', renew)
+    document.addEventListener('visibilitychange', renew)
+    const timer = setInterval(refreshLinks, 60 * 60 * 1000)
+    return () => {
+      window.removeEventListener('focus', renew)
+      document.removeEventListener('visibilitychange', renew)
+      clearInterval(timer)
+    }
+  }, [joined, refreshLinks])
 
   // Built once and kept for the session. The pipeline lives in the main process and speaks only to this;
   // everything it produces is put on the socket here, so the server sees ordinary signalling either way.
@@ -1143,6 +1180,12 @@ export default function App() {
         else if (message.type === 'room-kept') { setRoomClosing(null); setNotice('A exclusão da sala foi cancelada.') }
         else if (message.type === 'room-closed') { setAccessSession(''); setJoined(false); setNotice('Esta sala foi encerrada.') }
         else if (message.type === 'chat-history') setMessages(Array.isArray(message.messages) ? message.messages : [])
+        else if (message.type === 'chat-links' && Array.isArray(message.links)) {
+          // Renewed addresses for files already on screen. Patched in place so nothing moves, nothing
+          // is lost, and a picture that had failed to load tries again with an address that works.
+          const fresh = new Map(message.links.filter((link) => link?.id && typeof link.url === 'string').map((link) => [link.id, link.url]))
+          if (fresh.size) setMessages((current) => current.map((entry) => (entry.file && fresh.has(entry.id) ? { ...entry, file: { ...entry.file, url: fresh.get(entry.id) } } : entry)))
+        }
         else if (message.type === 'chat' && message.message?.id) {
           setMessages((current) => [...current, message.message].slice(-200))
           if (!showChatRef.current && message.message.from !== selfId) setUnreadChat((current) => current + 1)
@@ -1520,7 +1563,7 @@ export default function App() {
   const panelById = {
     people: <section {...peoplePanel.box}><div {...peoplePanel.grip} className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'owner' ? ' · DONO' : isCoOwner(user) ? ' · CO-DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}{user.voice ? ' · no áudio' : ''}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isOwner && roomPermanent && <button className={`moderation-action${isCoOwner(user) ? ' on' : ''}`} title={isCoOwner(user) ? 'Deixa de ser co-dono' : 'Tornar co-dono: poderá pedir a exclusão da sala'} onClick={() => setCoOwner(user, !isCoOwner(user))}><Star size={15} /></button>}{user.id !== selfId && isOwner && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="moderation-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="moderation-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div>{voiceJoined && user.voice && user.id !== selfId && <div className="person-voice"><span className={`voice-meter small${voiceDeafened || voiceVolumes[user.name] === 0 ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.peers?.[user.name] || 0)})` }} /></span><input type="range" min="0" max={MAX_VOLUME} step="5" value={voiceVolumes[user.name] ?? DEFAULT_VOLUME} onChange={(event) => setPeerVolume(user.name, event.target.value)} aria-label={`Volume de ${user.name} para você`} /><b>{voiceVolumes[user.name] ?? DEFAULT_VOLUME}%</b></div>}</article>)}</div></section>,
     stage: <section {...stagePanel.box}><div {...stagePanel.grip} className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>,
-    chat: <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} panel={chatPanel} onUpload={uploadFile} uploading={uploading} canUpload={roomPermanent} />,
+    chat: <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} panel={chatPanel} onUpload={uploadFile} uploading={uploading} canUpload={roomPermanent} onStale={refreshLinks} />,
     settings: <aside {...settingsPanel.box}><div {...settingsPanel.grip} className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented"><button type="button" className={fps === 30 ? 'selected' : ''} onClick={() => setFps(30)}>30</button><button type="button" className={fps === 60 ? 'selected' : ''} onClick={() => setFps(60)}>60</button></div><p className="hint">É uma preferência. O navegador, a tela e a GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p></fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>,
   }
 

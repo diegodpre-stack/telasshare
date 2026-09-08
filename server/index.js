@@ -13,9 +13,47 @@ import { createFileStorage, MAX_FILE_BYTES, MAX_ROOM_BYTES, safeName } from './f
 import crypto from 'node:crypto'
 
 const app = express()
+// Announcing the framework only helps somebody deciding which published flaw to try first.
+app.disable('x-powered-by')
 const origin = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
-app.use(cors({ origin: origin.split(',').map((value) => value.trim()) }))
+const origins = origin.split(',').map((value) => value.trim()).filter(Boolean)
+app.use(cors({ origin: origins }))
 app.use(express.json({ limit: '16kb' }))
+
+// The signalling socket lives on the same host as the page, so the policy is built from the origins
+// that are already trusted rather than from a wildcard.
+const socketOrigins = origins.map((value) => value.replace(/^http/, 'ws'))
+const policy = [
+  "default-src 'self'",
+  // wasm-unsafe-eval is RNNoise: the suppressor is WebAssembly, and without it the microphone quietly
+  // loses noise suppression while everything else keeps working, which is the worst way to break.
+  "script-src 'self' 'wasm-unsafe-eval'",
+  // The panels are resized by writing style.height onto the element, which counts as an inline style.
+  // The @import at the top of the stylesheet is what pulls the two typefaces.
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
+  "worker-src 'self' blob:",
+  `connect-src 'self' ${socketOrigins.join(' ')}`.trim(),
+  // Nothing here is ever framed, and the buttons on this page start a screen capture and a microphone.
+  // Being framed by a page that covers them is the whole clickjacking trick, so it is refused outright.
+  "frame-ancestors 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+].join('; ')
+
+app.use((_req, res, next) => {
+  res.set('Content-Security-Policy', policy)
+  // For browsers that predate frame-ancestors. Harmless where both are understood.
+  res.set('X-Frame-Options', 'DENY')
+  // The page asks for a microphone and for a screen, and for nothing else. Saying so means a flaw in
+  // some dependency cannot quietly reach for the camera or the location.
+  res.set('Permissions-Policy', 'camera=(), geolocation=(), payment=(), usb=(), microphone=(self), display-capture=(self)')
+  next()
+})
+
 app.get('/health', (_req, res) => res.json({ ok: true }))
 
 // Every session anybody holds is signed with this, so a value anybody else knows is every account at

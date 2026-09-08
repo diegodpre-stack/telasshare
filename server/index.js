@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { WebSocketServer, WebSocket } from 'ws'
 import { createRateLimiter } from './rateLimit.js'
+import { createStore } from './store.js'
+import { createFileStorage, MAX_FILE_BYTES, MAX_ROOM_BYTES, safeName } from './files.js'
 import crypto from 'node:crypto'
 
 const app = express()
@@ -16,21 +18,102 @@ app.use(cors({ origin: origin.split(',').map((value) => value.trim()) }))
 app.use(express.json({ limit: '16kb' }))
 app.get('/health', (_req, res) => res.json({ ok: true }))
 
-const sessionSecret = process.env.SESSION_SECRET || (!process.env.RENDER ? 'local-development-session-secret' : '')
-const adminPasswords = [1, 2, 3, 4].map((number) => process.env[`ADMIN_PASSWORD_${number}`])
+// Every session anybody holds is signed with this, so a value anybody else knows is every account at
+// once. It used to fall back to a fixed string whenever RENDER was unset -- which was fine while Render
+// was the only place this ran, and became a hole the moment it ran anywhere else: a deploy that forgot
+// the variable would sign with a constant sitting in a public repository, and look perfectly healthy.
+//
+// So there is no constant any more. Missing means one random secret for this run: nothing to guess, no
+// configuration needed to develop, and a restart quietly signing out everybody -- which is a nuisance
+// in development and an unmissable symptom in production, where it means the variable is missing.
+const sessionSecret = process.env.SESSION_SECRET || (() => {
+  console.warn('SESSION_SECRET nao definido. Usando um segredo aleatorio, valido apenas ate reiniciar.')
+  return crypto.randomBytes(48).toString('base64url')
+})()
 const loginAttempts = new Map()
 const rooms = new Map()
+// Only permanent rooms are written down. A temporary one is still exactly what it was: it lives in
+// memory, and it goes fifteen seconds after the last person leaves.
+//
+// The database now lives somewhere else, which means it can be unreachable in a way a local file never
+// was. Sharing a screen and talking need it for nothing at all, so an outage must not take those down --
+// the server comes up either way, and only permanent rooms are missing while it lasts.
+const store = createStore()
+const fileStorage = createFileStorage()
+let storeReady = false
+try {
+  await store.connect()
+  for (const room of await store.loadRooms()) rooms.set(room.key, { ...room, deleteTimer: null })
+  storeReady = true
+  console.log(`Rooms restored: ${rooms.size}`)
+} catch (error) {
+  console.error('Database unreachable; permanent rooms are unavailable this session:', error.message)
+}
 const ROOM_SESSION_MS = 30 * 24 * 60 * 60 * 1000
-// Chat lives and dies with the room, like everything else here: there is no database and the free tier's
-// disk is wiped on every restart anyway, so pretending otherwise would only be a way to lose messages
-// surprisingly instead of predictably. What this buffer buys is that somebody who joins a minute late
-// still sees what was being talked about.
+// How much of a conversation is kept. In a temporary room this is all there is, and it goes when the
+// room does. In a permanent one the same hundred messages are written to disk and read back on boot, so
+// what somebody sees on joining is the same either way -- the difference is only whether it survives.
+// A room nobody has walked into for two months is a room nobody wants. Any visit resets it -- it does
+// not have to be the owner, because the question is whether the room is still used, not by whom.
+const ROOM_IDLE_MS = Number(process.env.ROOM_IDLE_MS) || 60 * 24 * 60 * 60 * 1000
+// A co-owner can ask for the room to go, but not have it gone. The wait is the whole point: it is time
+// for the owner to notice and say no.
+const ROOM_DELETE_DELAY_MS = Number(process.env.ROOM_DELETE_DELAY_MS) || 3 * 24 * 60 * 60 * 1000
+const ROOM_SWEEP_MS = Number(process.env.ROOM_SWEEP_MS) || 60 * 60 * 1000
 const CHAT_HISTORY = 100
 const CHAT_MAX_LENGTH = 500
 const TURN_CREDENTIAL_TTL_SECONDS = 60 * 60
 const TURN_USAGE_CACHE_MS = 5 * 60 * 1000
 const TURN_DEFAULT_LIMIT_GB = 800
 let turnUsageCache = null
+const cleanUserName = (value) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 32) : ''
+// Standing is recognised by the session that has it or by the name on that session, so the same person
+// is themselves on another machine. The name is not proof of anything -- signing in asks for no password
+// -- so anybody who types the creator's name is treated as the creator. That is a deliberate trade for
+// an app with no accounts, made with the alternative on the table, and not an oversight.
+const nameKey = (value) => cleanUserName(value).toLocaleLowerCase('pt-BR')
+const isOwner = (room, session) => room.ownerSub === session?.sub
+  || (room.ownerName ? room.ownerName === nameKey(session?.name) : false)
+const isCoOwner = (room, session) => {
+  if (!room.coOwners) return false
+  if (room.coOwners.has(session?.sub)) return true
+  const wanted = nameKey(session?.name)
+  return wanted ? [...room.coOwners.values()].some((name) => name === wanted) : false
+}
+// Whoever asked for the room to go, by either measure, so they can take it back from anywhere.
+const askedToDelete = (room, session) => room.deleteBy === session?.sub
+  || (room.deleteByName ? nameKey(room.deleteByName) === nameKey(session?.name) : false)
+// Somebody walked in. Whoever it was, the room's two-month clock starts over.
+const touchRoom = (room, key) => {
+  room.lastSeenAt = Date.now()
+  if (room.permanent) store.touchRoom(key, room.lastSeenAt)
+}
+// Returns the write, so a caller about to tell somebody the room is gone can wait for it to be true.
+const removeRoom = (key, room, reason) => {
+  for (const client of roomClients(room.id)) {
+    safeSend(client.socket, { type: 'room-closed', reason })
+    client.socket.close(1000, 'Sala encerrada')
+  }
+  clearTimeout(room.deleteTimer)
+  rooms.delete(key)
+  // Three things, and only the first is the database's. A room removed without the other two leaves its
+  // files on the disk with nothing pointing at them, which is space nobody can ever reclaim by hand.
+  return Promise.all([
+    store.deleteRoom(key),
+    store.deleteFilesForRoom(key),
+    fileStorage.removeRoom(room.id).catch((error) => console.error(`Could not remove files of ${key}:`, error.message)),
+  ])
+}
+// Both clocks are checked in one place and on a timer rather than when somebody happens to ask, so a
+// room that expired while the server was down is gone the moment it comes back up.
+const sweepRooms = () => {
+  const now = Date.now()
+  for (const [key, room] of [...rooms]) {
+    if (!room.permanent) continue
+    if (room.deleteAfter !== null && room.deleteAfter <= now) { removeRoom(key, room, 'requested'); continue }
+    if (now - (room.lastSeenAt ?? room.createdAt) >= ROOM_IDLE_MS) removeRoom(key, room, 'idle')
+  }
+}
 const normalizeRoomName = (value) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 40) : ''
 const roomKey = (name) => name.toLocaleLowerCase('pt-BR')
 const hashPassword = (password, salt = crypto.randomBytes(16).toString('base64url')) => ({
@@ -43,8 +126,6 @@ const passwordMatches = (password, stored) => {
   const expected = Buffer.from(stored.hash, 'base64url')
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected)
 }
-const secretMatches = (password, expected) => typeof password === 'string' && typeof expected === 'string' && password.length === expected.length && crypto.timingSafeEqual(Buffer.from(password), Buffer.from(expected))
-const cleanUserName = (value) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, 32) : ''
 const rateLimitLogin = (req, res) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown'
   const now = Date.now()
@@ -77,44 +158,59 @@ app.post('/api/login', (req, res) => {
   if (!sessionSecret) return res.status(503).json({ error: 'O acesso ao site ainda não foi configurado.' })
   const attempt = rateLimitLogin(req, res); if (!attempt) return
   const name = cleanUserName(req.body?.name)
-  const adminPassword = typeof req.body?.adminPassword === 'string' ? req.body.adminPassword : ''
-  let role = 'member'
-  if (adminPassword) {
-    if (adminPasswords[0] && secretMatches(adminPassword, adminPasswords[0])) role = 'superadmin'
-    else if (adminPasswords.slice(1).some((password) => secretMatches(adminPassword, password))) role = 'admin'
-    else role = 'invalid'
-  }
-  if (name.length < 2 || role === 'invalid') {
+  if (name.length < 2) {
     attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
     return res.status(401).json({ error: 'Usuário ou senha incorretos.' })
   }
   loginAttempts.delete(attempt.ip)
-  res.json({ session: signSession({ kind: 'site', sub: crypto.randomUUID(), name, role, exp: attempt.now + ROOM_SESSION_MS }), role })
+  res.json({ session: signSession({ kind: 'site', sub: crypto.randomUUID(), name, exp: attempt.now + ROOM_SESSION_MS }) })
 })
 
 app.get('/api/rooms', (req, res) => {
   const authenticated = readBearerSession(req)
   if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
-  res.json({ rooms: [...rooms.values()].map(({ id, name, password }) => ({ id, name, open: !password })), role: authenticated.role })
+  res.json({
+    rooms: [...rooms.values()].map((room) => ({
+      id: room.id,
+      name: room.name,
+      open: !room.password,
+      permanent: room.permanent === true,
+      // Said plainly rather than as a role, so the interface never has to work out what somebody is.
+      owned: isOwner(room, authenticated),
+      coOwner: isCoOwner(room, authenticated),
+      // A room on its way out has to look like one, or the wait would be a silent countdown.
+      deleteAfter: room.deleteAfter ?? null,
+      deleteByName: room.deleteByName ?? null,
+    })),
+  })
 })
 
-app.post('/api/rooms', (req, res) => {
+app.post('/api/rooms', async (req, res) => {
   const authenticated = readBearerSession(req)
   if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
   const roomName = normalizeRoomName(req.body?.roomName)
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
+  const permanent = req.body?.permanent === true
   // An empty password means an open room. Anything else still has to be a real one: a two-character
   // password would read as protection while offering none.
   if (roomName.length < 2) return res.status(400).json({ error: 'Informe um nome com pelo menos 2 caracteres.' })
   if (password.length > 0 && (password.length < 4 || password.length > 128)) {
     return res.status(400).json({ error: 'A senha precisa ter de 4 a 128 caracteres, ou fique em branco para uma sala aberta.' })
   }
+  if (permanent && !storeReady) {
+    return res.status(503).json({ error: 'O banco de dados está indisponível agora. Crie uma sala temporária ou tente mais tarde.' })
+  }
   const key = roomKey(roomName)
   if (rooms.has(key)) return res.status(409).json({ error: 'Não foi possível criar essa sala. Escolha outro nome.' })
-  const room = { id: crypto.randomUUID(), name: roomName, password: password ? hashPassword(password) : null, ownerSub: authenticated.sub, bannedNames: new Set(), messages: [], createdAt: Date.now(), deleteTimer: null }
+  const now = Date.now()
+  const room = { key, id: crypto.randomUUID(), name: roomName, password: password ? hashPassword(password) : null, ownerSub: authenticated.sub, ownerName: nameKey(authenticated.name), permanent, bannedNames: new Set(), coOwners: new Map(), messages: [], createdAt: now, lastSeenAt: now, deleteAfter: null, deleteBy: null, deleteByName: null, deleteTimer: null }
   rooms.set(key, room)
-  scheduleRoomDeletion(room, key)
-  res.status(201).json({ room: { id: room.id, name: room.name } })
+  // Awaited, unlike a chat message: somebody is about to be told their permanent room exists, and it
+  // has to be true before they are told. Chat stays unawaited because it happens constantly and losing
+  // the last line of a conversation to a crash costs far less than a round trip on every message.
+  if (permanent) await store.saveRoom(key, room)
+  else scheduleRoomDeletion(room, key)
+  res.status(201).json({ room: { id: room.id, name: room.name, permanent } })
 })
 
 app.post('/api/rooms/:roomId/join', (req, res) => {
@@ -124,15 +220,169 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
   const entry = [...rooms.entries()].find(([, candidate]) => candidate.id === req.params.roomId)
   const room = entry?.[1]
-  const valid = room && (authenticated.role === 'superadmin' || !room.password || passwordMatches(password, room.password))
+  // Coming back to a room this browser already opened. The seat is the session the server itself issued
+  // once the password was right, so accepting it is not a second door -- it is the same door, still
+  // open. It has to name this room and this site session: a seat carried to another machine, or to the
+  // desktop app, names a site session that is not the one presenting it, and the password is asked
+  // again. Which is the point.
+  const returning = verifySession(typeof req.body?.seat === 'string' ? req.body.seat : '')
+  const seated = returning?.kind === 'room' && returning.sub === authenticated.sub && returning.roomId === req.params.roomId
+  const valid = room && (seated || !room.password || passwordMatches(password, room.password))
   if (!valid) {
     attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
     return res.status(401).json({ error: 'Senha da sala incorreta.' })
   }
   loginAttempts.delete(attempt.ip)
+  touchRoom(room, entry[0])
   scheduleRoomDeletion(room, entry[0])
-  const roomRole = authenticated.role === 'member' && room.ownerSub === authenticated.sub ? 'owner' : authenticated.role
+  const roomRole = isOwner(room, authenticated) ? 'owner' : 'member'
   res.json({ session: signSession({ kind: 'room', sub: authenticated.sub, name: authenticated.name, role: roomRole, roomId: room.id, roomKey: entry[0], exp: attempt.now + ROOM_SESSION_MS }), role: roomRole, roomName: room.name, open: !room.password })
+})
+
+// Proving you could walk in. Standing says who somebody is, and with no accounts that rests on a name
+// anybody can type -- so it cannot be the only thing standing between a room and its destruction. The
+// password protects entering, and destroying is not the lesser act.
+// An <img> cannot send an Authorization header, so the permission has to travel in the address. Signed
+// and short-lived rather than a plain identifier: a link that never expires is a link that leaks once
+// and works forever. Minted when a message is handed over, so a session's links stay usable while the
+// session lasts and are useless to anybody who copies one out of it a day later.
+const FILE_LINK_MS = 6 * 60 * 60 * 1000
+const fileUrl = (id) => `/api/files/${id}?token=${encodeURIComponent(signSession({ kind: 'file', file: id, exp: Date.now() + FILE_LINK_MS }))}`
+// Messages travel with their file's address attached, so nothing has to be asked for separately.
+const withLinks = (message) => (message.file ? { ...message, file: { ...message.file, url: fileUrl(message.file.id) } } : message)
+
+const roomPasswordOk = (room, supplied) => !room.password
+  || passwordMatches(typeof supplied === 'string' ? supplied : '', room.password)
+
+// The creator can remove their room at once. A co-owner can only start a countdown, which the creator
+// has three days to stop -- so appointing one is not handing over the power to destroy the room.
+//
+// A POST rather than a DELETE because it carries the password: a body on a DELETE is permitted but has
+// no agreed meaning, and an intermediary that drops it would look exactly like a wrong password.
+app.post('/api/rooms/:roomId/delete', async (req, res) => {
+  const authenticated = readBearerSession(req)
+  if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
+  const attempt = rateLimitLogin(req, res); if (!attempt) return
+  const entry = [...rooms.entries()].find(([, candidate]) => candidate.id === req.params.roomId)
+  if (!entry) return res.status(404).json({ error: 'Essa sala não existe mais.' })
+  const [key, room] = entry
+  // Standing is checked before the password, so somebody with no business here is turned away without
+  // ever being told whether a guess was close.
+  if (!isOwner(room, authenticated) && !isCoOwner(room, authenticated)) {
+    return res.status(403).json({ error: 'Só quem criou a sala ou um co-dono pode apagá-la.' })
+  }
+  if (!roomPasswordOk(room, req.body?.password)) {
+    attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
+    return res.status(401).json({ error: 'Senha da sala incorreta.' })
+  }
+  loginAttempts.delete(attempt.ip)
+  if (isOwner(room, authenticated)) {
+    await removeRoom(key, room, 'owner')
+    return res.json({ deleted: true })
+  }
+  // Asking twice does not make it sooner: the first request is the one that counts.
+  if (room.deleteAfter === null) {
+    room.deleteAfter = Date.now() + ROOM_DELETE_DELAY_MS
+    room.deleteBy = authenticated.sub
+    room.deleteByName = authenticated.name
+    await store.setPendingDeletion(key, room.deleteAfter, room.deleteBy, room.deleteByName)
+    for (const client of roomClients(room.id)) safeSend(client.socket, { type: 'room-closing', deleteAfter: room.deleteAfter, byName: room.deleteByName })
+  }
+  res.json({ deleted: false, deleteAfter: room.deleteAfter, deleteByName: room.deleteByName })
+})
+
+// Calling off a countdown. The creator can stop any; a co-owner can only take back their own request,
+// so one co-owner cannot undo another's while the creator is away.
+app.post('/api/rooms/:roomId/keep', async (req, res) => {
+  const authenticated = readBearerSession(req)
+  if (!authenticated) return res.status(401).json({ error: 'Entre no site novamente.' })
+  const attempt = rateLimitLogin(req, res); if (!attempt) return
+  const entry = [...rooms.entries()].find(([, candidate]) => candidate.id === req.params.roomId)
+  if (!entry) return res.status(404).json({ error: 'Essa sala não existe mais.' })
+  const [key, room] = entry
+  const mayKeep = isOwner(room, authenticated) || askedToDelete(room, authenticated)
+  if (!mayKeep) return res.status(403).json({ error: 'Só quem criou a sala ou quem pediu a exclusão pode cancelá-la.' })
+  // The same proof as deleting. Calling off a countdown is the gentler act, but it is the one that
+  // decides whether the room lives, so it is not left as the easier door.
+  if (!roomPasswordOk(room, req.body?.password)) {
+    attempt.recent.push(attempt.now); loginAttempts.set(attempt.ip, attempt.recent)
+    return res.status(401).json({ error: 'Senha da sala incorreta.' })
+  }
+  loginAttempts.delete(attempt.ip)
+  room.deleteAfter = null; room.deleteBy = null; room.deleteByName = null
+  await store.setPendingDeletion(key, null, null, null)
+  for (const client of roomClients(room.id)) safeSend(client.socket, { type: 'room-kept' })
+  res.json({ kept: true })
+})
+
+// Being in the room is the permission. Not the creator, not a co-owner -- anybody who got past the
+// door, because that is exactly who is allowed to see what is posted there.
+app.post('/api/room/files', async (req, res) => {
+  const authenticated = authenticateRoomRequest(req, res)
+  if (!authenticated) return
+  const entry = [...rooms.entries()].find(([, candidate]) => candidate.id === authenticated.roomId)
+  if (!entry) return res.status(404).json({ error: 'Essa sala não existe mais.' })
+  const [key, room] = entry
+  if (!room.permanent) return res.status(400).json({ error: 'Uma sala temporária não guarda arquivos.' })
+  if (!storeReady) return res.status(503).json({ error: 'O banco de dados está indisponível agora.' })
+
+  const used = await store.roomUsage(key)
+  const received = await fileStorage.receive({
+    roomId: room.id,
+    stream: req,
+    limit: MAX_FILE_BYTES,
+    remainingQuota: Math.max(0, MAX_ROOM_BYTES - used),
+  })
+  if (!received.ok) {
+    return res.status(received.reason === 'room-full' ? 507 : 413).json({
+      error: received.reason === 'room-full'
+        ? 'Esta sala já usou todo o espaço dela.'
+        : received.reason === 'empty' ? 'Arquivo vazio.' : `Arquivo maior que o limite de ${Math.round(MAX_FILE_BYTES / 1048576)} MB.`,
+    })
+  }
+
+  const file = {
+    id: received.id,
+    roomKey: key,
+    roomId: room.id,
+    from: authenticated.sub,
+    fromName: authenticated.name,
+    // Shown, never used to build a path. What is on disk is the generated identifier.
+    name: safeName(req.get('x-file-name') ? decodeURIComponent(req.get('x-file-name')) : 'arquivo'),
+    kind: received.kind,
+    inline: received.inline,
+    bytes: received.bytes,
+    sha256: received.sha256,
+    at: Date.now(),
+  }
+  await store.addFile(file)
+
+  // A file arrives in the conversation like anything else somebody says, so it appears where people are
+  // already looking rather than in a list they have to go and find.
+  const message = { id: crypto.randomUUID(), from: authenticated.sub, fromName: authenticated.name, text: '', at: file.at, file: { id: file.id, name: file.name, kind: file.kind, inline: file.inline, bytes: file.bytes } }
+  room.messages.push(message)
+  if (room.messages.length > CHAT_HISTORY) room.messages.splice(0, room.messages.length - CHAT_HISTORY)
+  await store.addMessage(key, message, CHAT_HISTORY)
+  sendToRoom(room.id, { type: 'chat', message: withLinks(message) })
+  res.status(201).json({ file: { ...message.file, url: fileUrl(file.id) } })
+})
+
+// Downloading. The token in the address is the whole permission, so it is checked before anything else
+// is looked up, and the headers are chosen so that a file can never be run by the browser that fetched
+// it -- only a short list of formats is handed over as itself, and everything else is a download.
+app.get('/api/files/:id', async (req, res) => {
+  const claim = verifySession(typeof req.query.token === 'string' ? req.query.token : '')
+  if (claim?.kind !== 'file' || claim.file !== req.params.id) return res.status(401).json({ error: 'Link expirado.' })
+  const file = storeReady ? await store.findFile(req.params.id) : null
+  if (!file) return res.status(404).json({ error: 'Arquivo não encontrado.' })
+  // nosniff is what stops a browser deciding for itself that an octet-stream looks like HTML.
+  res.set('X-Content-Type-Options', 'nosniff')
+  res.set('Cache-Control', 'private, max-age=3600')
+  res.set('Content-Type', file.inline ? file.kind : 'application/octet-stream')
+  res.set('Content-Length', String(file.bytes))
+  // The filename is quoted and already stripped of anything that could end a header early.
+  res.set('Content-Disposition', `${file.inline ? 'inline' : 'attachment'}; filename="${file.name}"`)
+  res.sendFile(fileStorage.pathFor(file.roomId, file.id), (error) => { if (error && !res.headersSent) res.status(404).end() })
 })
 
 const turnConfiguration = () => ({
@@ -232,7 +482,7 @@ const tls = process.env.TLS_CERT_PATH && process.env.TLS_KEY_PATH
 const server = tls ? createHttpsServer(tls, app) : createHttpServer(app)
 const wss = new WebSocketServer({ server, maxPayload: 128 * 1024 })
 const clients = new Map()
-const allowedTypes = new Set(['hello', 'heartbeat', 'broadcast-start', 'broadcast-stop', 'voice-join', 'voice-leave', 'chat', 'watch-request', 'restart-request', 'moderate', 'signal', 'stop'])
+const allowedTypes = new Set(['hello', 'heartbeat', 'broadcast-start', 'broadcast-stop', 'voice-join', 'voice-leave', 'chat', 'watch-request', 'restart-request', 'moderate', 'promote', 'demote', 'signal', 'stop'])
 
 const safeSend = (socket, message) => {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
@@ -249,6 +499,8 @@ const cleanChatText = (value) => typeof value === 'string'
   ? value.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[^\S\n]+/g, ' ').trim().slice(0, CHAT_MAX_LENGTH)
   : ''
 const scheduleRoomDeletion = (room, key) => {
+  // The whole point of a permanent room: an empty one is still there tomorrow.
+  if (room.permanent) return
   clearTimeout(room.deleteTimer)
   room.deleteTimer = setTimeout(() => {
     if (roomClients(room.id).length === 0 && rooms.get(key)?.id === room.id) rooms.delete(key)
@@ -258,7 +510,7 @@ const isObject = (value) => value !== null && typeof value === 'object' && !Arra
 const validDescription = (value) => isObject(value) && ['offer', 'answer'].includes(value.type) && typeof value.sdp === 'string' && value.sdp.length < 100_000
 const validCandidate = (value) => value === null || (isObject(value) && (value.candidate === undefined || typeof value.candidate === 'string'))
 const validConnectionId = (value) => typeof value === 'string' && /^[a-zA-Z0-9-]{8,64}$/.test(value)
-const roleRank = { member: 0, owner: 1, admin: 2, superadmin: 3 }
+const roleRank = { member: 0, owner: 1 }
 
 wss.on('connection', (socket, request) => {
   const sessionToken = new URL(request.url, 'http://localhost').searchParams.get('session')
@@ -292,11 +544,18 @@ wss.on('connection', (socket, request) => {
       }
       const role = Object.hasOwn(roleRank, authenticated.role) ? authenticated.role : 'member'
       clients.set(id, { id, name, role, roomId: room.id, broadcasting: false, voice: false, socket })
+      touchRoom(room, authenticated.roomKey)
       clearTimeout(room.deleteTimer); room.deleteTimer = null
       registered = true
-      safeSend(socket, { type: 'welcome', id, role, roomName: room.name })
+      safeSend(socket, {
+        type: 'welcome', id, role, roomName: room.name,
+        permanent: room.permanent === true,
+        coOwners: [...(room.coOwners?.keys() || [])],
+        deleteAfter: room.deleteAfter ?? null,
+        deleteByName: room.deleteByName ?? null,
+      })
       // Sent to this one socket, not the room: it is what was already said, not something new.
-      safeSend(socket, { type: 'chat-history', messages: room.messages })
+      safeSend(socket, { type: 'chat-history', messages: room.messages.map(withLinks) })
       return broadcastUsers(room.id)
     }
     const sender = clients.get(id)
@@ -323,7 +582,8 @@ wss.on('connection', (socket, request) => {
       const entry = { id: crypto.randomUUID(), from: id, fromName: sender.name, text, at: Date.now() }
       room.messages.push(entry)
       if (room.messages.length > CHAT_HISTORY) room.messages.splice(0, room.messages.length - CHAT_HISTORY)
-      return sendToRoom(sender.roomId, { type: 'chat', message: entry })
+      if (room.permanent) store.addMessage(authenticated.roomKey, entry, CHAT_HISTORY)
+      return sendToRoom(sender.roomId, { type: 'chat', message: withLinks(entry) })
     }
     const target = typeof message.to === 'string' ? clients.get(message.to) : null
     if (!target || target.id === id || target.roomId !== sender.roomId) return safeSend(socket, { type: 'error', message: 'Usuário indisponível.' })
@@ -337,9 +597,40 @@ wss.on('connection', (socket, request) => {
       if (!validConnectionId(message.connectionId)) return safeSend(socket, { type: 'error', message: 'Identificador de transmissão inválido.' })
       return safeSend(target.socket, { type: 'restart-request', from: id, connectionId: message.connectionId })
     }
+    // Only the creator hands this out, and only to somebody who is in the room -- which is also the only
+    // way the server learns who they are, since there are no accounts to look anybody up in.
+    if (message.type === 'promote' || message.type === 'demote') {
+      if (!room.permanent) return safeSend(socket, { type: 'error', message: 'Só uma sala permanente tem co-donos.' })
+      if (!isOwner(room, authenticated)) return safeSend(socket, { type: 'error', message: 'Só quem criou a sala pode escolher co-donos.' })
+      if (isOwner(room, { sub: target.id, name: target.name })) return safeSend(socket, { type: 'error', message: 'Essa pessoa já é dona da sala.' })
+      const targetName = nameKey(target.name)
+      if (message.type === 'promote') {
+        room.coOwners.set(target.id, targetName)
+        store.addCoOwner(authenticated.roomKey, target.id, targetName)
+      } else {
+        room.coOwners.delete(target.id)
+        for (const [sub, name] of [...room.coOwners]) if (name === targetName) room.coOwners.delete(sub)
+        store.removeCoOwner(authenticated.roomKey, target.id, targetName)
+        // A co-owner who asked for the room to go and is then unappointed should not leave their
+        // countdown running behind them.
+        if (askedToDelete(room, { sub: target.id, name: target.name })) {
+          room.deleteAfter = null; room.deleteBy = null; room.deleteByName = null
+          store.setPendingDeletion(authenticated.roomKey, null, null, null)
+          for (const client of roomClients(room.id)) safeSend(client.socket, { type: 'room-kept' })
+        }
+      }
+      for (const client of roomClients(room.id)) safeSend(client.socket, { type: 'co-owners', coOwners: [...room.coOwners.keys()] })
+      return broadcastUsers(room.id)
+    }
     if (message.type === 'moderate') {
-      if (!['owner', 'admin', 'superadmin'].includes(sender.role) || !['kick', 'ban'].includes(message.action) || roleRank[sender.role] <= roleRank[target.role]) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })
-      if (message.action === 'ban') room.bannedNames.add(target.name.toLocaleLowerCase('pt-BR'))
+      // Moderation belongs to whoever made the room, which is the only standing left.
+      if (sender.role !== 'owner' || !['kick', 'ban'].includes(message.action) || roleRank[sender.role] <= roleRank[target.role]) return safeSend(socket, { type: 'error', message: 'Ação não autorizada.' })
+      if (message.action === 'ban') {
+        const banned = target.name.toLocaleLowerCase('pt-BR')
+        room.bannedNames.add(banned)
+        // A ban that a restart forgets is not a ban.
+        if (room.permanent) store.addBan(authenticated.roomKey, banned)
+      }
       safeSend(target.socket, { type: message.action === 'ban' ? 'banned' : 'kicked' })
       target.socket.close(1008, message.action === 'ban' ? 'Banido' : 'Expulso')
       return
@@ -375,6 +666,12 @@ wss.on('connection', (socket, request) => {
   })
   socket.on('error', () => socket.close())
 })
+
+// Run once before anything is served: a room whose two months ran out while the server was down should
+// be gone by the time the first person looks, not on the next hour's turn.
+sweepRooms()
+const roomSweep = setInterval(sweepRooms, ROOM_SWEEP_MS)
+roomSweep.unref?.()
 
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '0.0.0.0'

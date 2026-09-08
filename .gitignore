@@ -7,3 +7,7 @@ release
 *.crt
 .DS_Store
 native/gstreamer/
+
+# The local database. Rooms and conversations are this machine's, not the repository's.
+data/
+package.json.antes-do-teste

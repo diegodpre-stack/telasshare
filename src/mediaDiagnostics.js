@@ -1,3 +1,5 @@
+import { routeFromPair } from './icePolicy.js'
+
 const number = (value) => Number.isFinite(value) ? value : null
 const rounded = (value) => Number.isFinite(value) ? Math.round(value * 100) / 100 : null
 export function summarizeStats(stats, previous = new Map()) {
@@ -35,7 +37,7 @@ export function summarizeStats(stats, previous = new Map()) {
       powerEfficientEncoder: sending && typeof r.powerEfficientEncoder === 'boolean' ? r.powerEfficientEncoder : null,
       powerEfficientDecoder: !sending && typeof r.powerEfficientDecoder === 'boolean' ? r.powerEfficientDecoder : null,
       targetMbps: rounded(r.targetBitrate / 1e6),
-      route: pair ? local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'TURN' : 'P2P' : null,
+      route: routeFromPair(local, remote)?.toUpperCase() ?? null,
       iceProtocol: local?.protocol ?? remote?.protocol ?? null,
       localRelayProtocol: local?.relayProtocol ?? null,
       localCandidateType: local?.candidateType ?? null, remoteCandidateType: remote?.candidateType ?? null,

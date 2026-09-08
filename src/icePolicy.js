@@ -18,6 +18,22 @@ export async function canPreserveWithoutTurn(pc) {
   })
 }
 
+// What the two ends of the chosen pair say about how the picture is actually travelling.
+//
+// Returns null when it cannot tell, and that is the whole point of it existing. The old expression read
+// "either end is a relay ? TURN : P2P", so a pair whose candidate reports had not arrived yet -- or an
+// answer of nothing at all -- came out as a confident "P2P". Somebody who had asked for TURN only was
+// then shown P2P by a label that had simply not looked. Not knowing is not the same as direct, and the
+// display can say nothing far more honestly than it can say the wrong thing.
+export function routeFromPair(local, remote) {
+  // The two claims are not symmetric. One end known to be a relay settles it -- whatever the other end
+  // turns out to be, the picture is going through the relay to reach it. Saying "direct", though, is a
+  // claim about both ends at once, so it needs both of them.
+  if (local?.candidateType === 'relay' || remote?.candidateType === 'relay') return 'turn'
+  if (!local?.candidateType || !remote?.candidateType) return null
+  return 'p2p'
+}
+
 // Preserve immutable options when changing stages on an existing connection.
 export function buildIceConfiguration(servers, stage, relayOnly = false, current = {}) {
   return { ...current, iceServers: selectIceServers(servers, stage), iceTransportPolicy: relayOnly ? 'relay' : 'all' }

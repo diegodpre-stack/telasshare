@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   clampSize, createPanelLayout, dropRegion, normalizeColumns, placePanel,
   DEFAULT_COLUMNS, PANELS, PANEL_LIMITS,
@@ -129,4 +130,21 @@ const noStorage = createPanelLayout({ storage: null })
 assert.doesNotThrow(() => { noStorage.resize('chat', { width: 300 }); noStorage.place('chat', 'people', 'below') })
 assert.deepEqual(noStorage.columns, [['people', 'chat'], ['stage'], ['settings']], 'it still works for this session')
 
-console.log('PASS: panels stack into columns and split back out, a drop reads as above, below or to either side, an emptied column disappears, sizes are clamped and merged rather than overwritten, an arrangement from the one-row version is carried over, a damaged one is repaired, and a reset is remembered.')
+// --- the rule has to actually reach an element ---------------------------
+// A resize rule written for a class the JSX never emits is a rule that does nothing, and nothing about
+// it looks wrong: the CSS is valid, the selector is spelled correctly, and the panel simply refuses to
+// be dragged downwards. That is exactly how `.panel.resizable` sat dead until somebody tried to resize
+// a panel and could not. So the two halves are checked against each other.
+const source = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8')
+for (const name of ['panel', 'resizable']) {
+  assert.ok(source.includes(`panel ${name === 'panel' ? '' : name}`.trim()), `App.jsx must emit the ${name} class`)
+}
+assert.ok(/className: `panel resizable /.test(source), 'every panel is built with the class its resize rule needs')
+assert.ok(/\.panel\.resizable\{[^}]*resize:vertical/.test(css), 'and that class is what carries the vertical resize')
+// The picture panel has to be able to scroll, or a stretched live sits outside it with its own grip
+// out of reach and no way back.
+assert.ok(/\.panel\.stage\{[^}]*display:flex/.test(css), 'the stage panel is a column')
+assert.ok(/\.panel\.stage \.screens-grid\{[^}]*overflow-y:auto[^}]*min-height:0/.test(css), 'so its grid scrolls instead of overflowing')
+
+console.log('PASS: panels stack into columns and split back out, a drop reads as above, below or to either side, an emptied column disappears, sizes are clamped and merged rather than overwritten, an arrangement from the one-row version is carried over, a damaged one is repaired, and a reset is remembered; and the resize rules reach a class the app actually emits.')

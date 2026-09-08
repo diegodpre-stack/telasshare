@@ -14,7 +14,7 @@ const diagnosticsEnabled = (() => {
     return localStorage.getItem('entretelas-diagnostico') === '1'
   } catch { return false }
 })()
-import { buildIceConfiguration, initialIceStage, canPreserveWithoutTurn } from './icePolicy.js'
+import { buildIceConfiguration, initialIceStage, canPreserveWithoutTurn, routeFromPair } from './icePolicy.js'
 import { applySenderSettings, scaleForTarget } from './senderSettings.js'
 import { preferHardwareVideoCodecs } from './encoderSupport.js'
 import { mediaEvents, recordPeerFailure } from './mediaEvents.js'
@@ -24,7 +24,10 @@ import { createVoiceMixer, DEFAULT_VOLUME, MAX_VOLUME } from './voiceMixer.js'
 import { createVoiceInput, MAX_THRESHOLD_DB, MIN_THRESHOLD_DB } from './voiceInput.js'
 import { splitLinks } from './chatLinks.js'
 import { createPanelLayout, dropRegion } from './panelLayout.js'
-import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, HeadphoneOff, Headphones, KeyRound, LogOut, MessageSquare, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Plus, Radio, RotateCcw, Send, ShieldCheck, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
+import { createRoomSeats } from './roomSeats.js'
+import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, HeadphoneOff, Headphones, KeyRound, LogOut, MessageSquare, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Paperclip, Plus, Radio, RotateCcw, Send, ShieldCheck, Star, Timer, Trash2, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
+
+const roomSeats = createRoomSeats()
 
 const localHost = ['localhost', '127.0.0.1'].includes(location.hostname)
 const defaultSignalHost = localHost ? `${location.hostname}:8787` : location.host
@@ -34,7 +37,8 @@ const resolutions = { auto: { label: 'Auto' }, '720p': { label: '720p', width: 1
 // decides how much room there is when the connection turns out to be good. Picking it was a question
 // nobody could answer without measuring, and the wrong answer quietly capped a healthy connection.
 const MAX_BITRATE_PER_VIEWER = 20_000_000
-const roleRanks = { member: 0, owner: 1, admin: 2, superadmin: 3 }
+// Two, and one of them only means "made this room".
+const roleRanks = { member: 0, owner: 1 }
 const defaultStunUrls = 'stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:stun2.l.google.com:19302,stun:stun.nextcloud.com:443'
 const staticIceServers = () => {
   const stun = (import.meta.env.VITE_STUN_URLS || defaultStunUrls).split(',').map((v) => v.trim()).filter(Boolean)
@@ -284,7 +288,21 @@ function ChatText({ text }) {
     : <span key={index}>{piece.value}</span>)}</>
 }
 
-function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel }) {
+const readableSize = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`)
+
+// A picture is shown; anything else is a link to save. Which of the two it is was decided by the server
+// from the file's own bytes, never from its name -- an SVG or an HTML file arrives here as something to
+// download precisely so it is never rendered on this page.
+function ChatFile({ file }) {
+  if (file.inline && file.kind.startsWith('image/')) {
+    return <a className="chat-image" href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} loading="lazy" /></a>
+  }
+  if (file.inline && file.kind.startsWith('video/')) return <video className="chat-video" src={file.url} controls preload="metadata" />
+  if (file.inline && file.kind.startsWith('audio/')) return <audio src={file.url} controls preload="metadata" />
+  return <a className="chat-file" href={file.url} target="_blank" rel="noopener noreferrer" download={file.name}><Paperclip size={15} /><span><strong>{file.name}</strong><small>{readableSize(file.bytes)}</small></span></a>
+}
+
+function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel, onUpload, uploading, canUpload }) {
   const listRef = useRef(null)
   const atBottomRef = useRef(true)
   // Following the conversation should not fight somebody reading back through it, so new messages only
@@ -304,10 +322,12 @@ function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel })
       {messages.length === 0 && <div className="empty"><MessageSquare size={28} /><strong>Nada por aqui ainda</strong><span>As mensagens somem quando a sala fica vazia.</span></div>}
       {messages.map((message) => <article className={`chat-message${message.from === selfId ? ' self' : ''}`} key={message.id}>
         <header><strong>{message.from === selfId ? 'Você' : message.fromName}</strong><time>{new Date(message.at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
-        <p><ChatText text={message.text} /></p>
+        {message.file && <ChatFile file={message.file} />}
+        {message.text ? <p><ChatText text={message.text} /></p> : null}
       </article>)}
     </div>
     <form className="chat-compose" onSubmit={submit}>
+      {canUpload && <label className="chat-attach" title={uploading ? 'Enviando…' : 'Enviar um arquivo'}><Paperclip size={16} /><input type="file" hidden disabled={uploading} onChange={(event) => { const chosen = event.target.files?.[0]; event.target.value = ''; if (chosen) onUpload(chosen) }} /></label>}
       <input value={draft} onChange={(event) => onDraft(event.target.value.slice(0, CHAT_MAX_LENGTH))} maxLength={CHAT_MAX_LENGTH} placeholder="Escreva uma mensagem" aria-label="Mensagem para a sala" />
       <span className={`chat-count${draft.length >= CHAT_MAX_LENGTH ? ' full' : ''}`}>{draft.length}/{CHAT_MAX_LENGTH}</span>
       <button type="submit" disabled={!draft.trim()} title="Enviar"><Send size={16} /></button>
@@ -357,8 +377,6 @@ function BuildStamp() {
 export default function App() {
   const [name, setName] = useState(localStorage.getItem('screen-share-name') || '')
   const [roomName, setRoomName] = useState('')
-  const [password, setPassword] = useState('')
-  const [adminMode, setAdminMode] = useState(false)
   const [accessError, setAccessError] = useState('')
   const [joining, setJoining] = useState(false)
   const [siteSession, setSiteSession] = useState(() => localStorage.getItem('screen-share-site-session') || '')
@@ -369,11 +387,10 @@ export default function App() {
   const [creatingRoom, setCreatingRoom] = useState(false)
   const [newRoomName, setNewRoomName] = useState('')
   const [newRoomPassword, setNewRoomPassword] = useState('')
-  const [siteRole, setSiteRole] = useState('member')
   const [joined, setJoined] = useState(false)
   const [connection, setConnection] = useState('offline')
   const [selfId, setSelfId] = useState('')
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [isOwner, setIsOwner] = useState(false)
   const [moderationRole, setModerationRole] = useState('member')
   const [users, setUsers] = useState([])
   const [remoteScreens, setRemoteScreens] = useState({})
@@ -411,6 +428,14 @@ export default function App() {
   const [showPeople, setShowPeople] = useState(true)
   const [showChat, setShowChat] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  // What the room tells us about itself on arrival, and keeps us posted on afterwards.
+  const [roomPermanent, setRoomPermanent] = useState(false)
+  const [coOwners, setCoOwners] = useState([])
+  const [roomClosing, setRoomClosing] = useState(null)
+  const [newRoomPermanent, setNewRoomPermanent] = useState(true)
+  const [deleting, setDeleting] = useState(null)
+  const [deletePassword, setDeletePassword] = useState('')
+  const [uploading, setUploading] = useState(false)
   // The arrangement lives in the module, which owns the clamping and the persistence. Nothing here reads
   // the counter -- it exists only to redraw when the module says the order changed.
   const [, redrawLayout] = useState(0)
@@ -547,7 +572,7 @@ export default function App() {
   const panelProps = (id, baseClass) => ({
     box: {
       ref: panelRef(id),
-      className: `panel ${baseClass}${layoutRef.current.leads(id) ? ' leads' : ''}${dragging && dragging !== id ? ' drop-target' : ''}${dragging === id ? ' dragging' : ''}${dropAt?.id === id ? ` drop-${dropAt.where}` : ''}`,
+      className: `panel resizable ${baseClass}${layoutRef.current.leads(id) ? ' leads' : ''}${dragging && dragging !== id ? ' drop-target' : ''}${dragging === id ? ' dragging' : ''}${dropAt?.id === id ? ` drop-${dropAt.where}` : ''}`,
         onDragOver: (event) => {
         if (!dragging || dragging === id) return
         event.preventDefault()
@@ -593,17 +618,22 @@ export default function App() {
     if (!nativeAvailable) return
     const native = createNativeBroadcast({
       onOffer: (connectionId, sdp) => {
-        const peerId = nativeViewersRef.current.get(connectionId)
-        if (peerId) send({ type: 'signal', to: peerId, connectionId, mode: 'auto', nativeSender: true, description: { type: 'offer', sdp } })
+        // The mode the viewer asked for, carried through rather than replaced with 'auto'. The pipeline
+        // is the sender here and gathers its own candidates whatever we say, but the viewer configures
+        // itself from this: told 'turn' it offers only relay candidates, and every pair that can form
+        // then goes through the relay. Announcing 'auto' threw the request away and the viewer connected
+        // directly -- while the label, correctly, said P2P to somebody who had asked for TURN.
+        const viewer = nativeViewersRef.current.get(connectionId)
+        if (viewer) send({ type: 'signal', to: viewer.peerId, connectionId, mode: viewer.mode, nativeSender: true, description: { type: 'offer', sdp } })
       },
       onCandidate: (connectionId, candidate) => {
-        const peerId = nativeViewersRef.current.get(connectionId)
-        if (peerId) send({ type: 'signal', to: peerId, connectionId, candidate })
+        const viewer = nativeViewersRef.current.get(connectionId)
+        if (viewer) send({ type: 'signal', to: viewer.peerId, connectionId, candidate })
       },
       onViewerGone: (connectionId) => {
-        const peerId = nativeViewersRef.current.get(connectionId)
+        const viewer = nativeViewersRef.current.get(connectionId)
         nativeViewersRef.current.delete(connectionId)
-        if (peerId) send({ type: 'stop', to: peerId, connectionId })
+        if (viewer) send({ type: 'stop', to: viewer.peerId, connectionId })
         setViewers((current) => { const next = { ...current }; delete next[connectionId]; return next })
       },
       onError: (_connectionId, reason) => {
@@ -773,7 +803,7 @@ export default function App() {
     const nativePeer = nativeViewersRef.current.get(connectionId)
     if (nativePeer !== undefined) {
       nativeViewersRef.current.delete(connectionId)
-      if (notify) send({ type: 'stop', to: nativePeer, connectionId })
+      if (notify) send({ type: 'stop', to: nativePeer.peerId, connectionId })
       nativeRef.current?.removeViewer(connectionId)
       setViewers((current) => { const next = { ...current }; delete next[connectionId]; return next })
       return
@@ -791,7 +821,7 @@ export default function App() {
     // The pipelines hold the capture and the GPU encoder, so they go first and unconditionally.
     if (nativeActiveRef.current) {
       mediaEvents.record('broadcast-stopped')
-      for (const [connectionId, peerId] of nativeViewersRef.current) {
+      for (const [connectionId, { peerId }] of nativeViewersRef.current) {
         if (notify) send({ type: 'stop', to: peerId, connectionId })
       }
       nativeViewersRef.current.clear()
@@ -943,7 +973,7 @@ export default function App() {
           }
         })
         const local = pair ? stats.get(pair.localCandidateId) : null; const remote = pair ? stats.get(pair.remoteCandidateId) : null
-        const route = pair ? local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'turn' : 'p2p' : null
+        const route = routeFromPair(local, remote)
         const protocol = String(local?.protocol || remote?.protocol || '').toUpperCase()
         const relayProtocol = String(local?.relayProtocol || '').toUpperCase()
         const rttMs = Number.isFinite(pair?.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : null
@@ -982,7 +1012,7 @@ export default function App() {
         })
         if (!pair) return
         const local = stats.get(pair.localCandidateId); const remote = stats.get(pair.remoteCandidateId)
-        const route = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'turn' : 'p2p'
+        const route = routeFromPair(local, remote)
         const protocol = String(local?.protocol || remote?.protocol || '').toUpperCase()
         const relayProtocol = String(local?.relayProtocol || '').toUpperCase()
         const rttMs = Number.isFinite(pair.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : null
@@ -1100,7 +1130,7 @@ export default function App() {
       socket.onerror = () => { if (!disposed) setNotice('Oscilação no servidor de sinalização. Tentando reconectar…') }
       socket.onmessage = ({ data }) => {
         let message; try { message = JSON.parse(data) } catch { return }
-        if (message.type === 'welcome') { setSelfId(message.id); setModerationRole(message.role); setIsAdmin(['owner', 'admin', 'superadmin'].includes(message.role)); setRoomName(message.roomName); if (broadcastingRef.current) send({ type: 'broadcast-start' }); if (voiceJoinedRef.current) send({ type: 'voice-join' }) }
+        if (message.type === 'welcome') { setSelfId(message.id); setModerationRole(message.role); setIsOwner(message.role === 'owner'); setRoomName(message.roomName); setRoomPermanent(message.permanent === true); setCoOwners(message.coOwners || []); setRoomClosing(message.deleteAfter ? { at: message.deleteAfter, byName: message.deleteByName } : null); if (broadcastingRef.current) send({ type: 'broadcast-start' }); if (voiceJoinedRef.current) send({ type: 'voice-join' }) }
         else if (message.type === 'users') {
           const nextIds = new Set(message.users.map((user) => user.id))
           if (knownUsersRef.current && message.users.some((user) => user.id !== selfId && !knownUsersRef.current.has(user.id))) playChime('join')
@@ -1108,6 +1138,10 @@ export default function App() {
           setUsers(message.users)
         }
         else if (message.type === 'watch-request') { if (localStreamRef.current) playChime('viewer'); shareWith(message.from, message.mode) }
+        else if (message.type === 'co-owners') setCoOwners(message.coOwners || [])
+        else if (message.type === 'room-closing') setRoomClosing({ at: message.deleteAfter, byName: message.byName })
+        else if (message.type === 'room-kept') { setRoomClosing(null); setNotice('A exclusão da sala foi cancelada.') }
+        else if (message.type === 'room-closed') { setAccessSession(''); setJoined(false); setNotice('Esta sala foi encerrada.') }
         else if (message.type === 'chat-history') setMessages(Array.isArray(message.messages) ? message.messages : [])
         else if (message.type === 'chat' && message.message?.id) {
           setMessages((current) => [...current, message.message].slice(-200))
@@ -1173,11 +1207,11 @@ export default function App() {
     if (cleanName.length < 2) return setAccessError('Use um nome com pelo menos 2 caracteres.')
     setJoining(true); setAccessError('')
     try {
-      const response = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: cleanName, adminPassword: adminMode ? password : '' }) })
+      const response = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: cleanName }) })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Não foi possível entrar.')
       localStorage.setItem('screen-share-site-session', result.session); localStorage.setItem('screen-share-name', cleanName)
-      setSiteSession(result.session); setSiteRole(result.role); setName(cleanName); setPassword(''); setAdminMode(false)
+      setSiteSession(result.session); setName(cleanName)
     } catch (error) { setAccessError(error.message) } finally { setJoining(false) }
   }
   const authHeaders = useCallback((json = false) => ({ authorization: `Bearer ${siteSession}`, ...(json ? { 'content-type': 'application/json' } : {}) }), [siteSession])
@@ -1185,7 +1219,7 @@ export default function App() {
     try {
       const response = await fetch('/api/rooms', { headers: authHeaders() }); const result = await response.json()
       if (response.status === 401) { localStorage.removeItem('screen-share-site-session'); setSiteSession(''); return }
-      if (!response.ok) throw new Error(); setRooms(result.rooms || []); setSiteRole(result.role || 'member')
+      if (!response.ok) throw new Error(); setRooms(result.rooms || [])
     } catch { setAccessError('Não foi possível carregar as salas agora.') }
   }, [authHeaders])
   useEffect(() => {
@@ -1194,29 +1228,46 @@ export default function App() {
     const timer = setInterval(loadRooms, 3_000)
     return () => clearInterval(timer)
   }, [siteSession, joined, loadRooms])
-  const joinRoom = async (room, chosenPassword = roomPassword) => {
+  // `seat` is a previous session for this room, offered instead of the password. `quiet` is for the
+  // attempt made on somebody's behalf: if an old seat has stopped working they should be asked for the
+  // password, not shown an error they did nothing to cause.
+  const joinRoom = async (room, chosenPassword = roomPassword, { seat = '', quiet = false } = {}) => {
     setJoining(true); setAccessError('')
     try {
-      const response = await fetch(`/api/rooms/${encodeURIComponent(room.id)}/join`, { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ password: chosenPassword }) }); const result = await response.json()
+      const response = await fetch(`/api/rooms/${encodeURIComponent(room.id)}/join`, { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ password: chosenPassword, seat }) }); const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Não foi possível entrar na sala.')
       try {
         const iceResponse = await fetch('/api/ice-servers', { headers: { authorization: `Bearer ${result.session}` } })
         const iceResult = await iceResponse.json()
         if (iceResponse.ok && Array.isArray(iceResult.iceServers) && iceResult.iceServers.length) iceServersRef.current = iceResult.iceServers
       } catch { /* STUN/P2P remains available when TURN configuration is unavailable */ }
+      roomSeats.remember(room.id, result.session)
       setAccessSession(result.session); setRoomName(result.roomName); setRoomPassword(''); setSelectedRoom(null); setJoined(true)
-    } catch (error) { setAccessError(error.message) } finally { setJoining(false) }
+      return true
+    } catch (error) { if (!quiet) setAccessError(error.message); return false } finally { setJoining(false) }
+  }
+  // What clicking a room does. An open room is entered; a room this browser has already been let into is
+  // entered on the strength of that; anything else asks.
+  const enterRoom = async (room) => {
+    setAccessError('')
+    if (room.open) { joinRoom(room, ''); return }
+    const seat = roomSeats.get(room.id)
+    if (seat) {
+      if (await joinRoom(room, '', { seat, quiet: true })) return
+      roomSeats.forget(room.id)
+    }
+    setSelectedRoom(room); setRoomPassword('')
   }
   const createRoom = async (event) => {
     event.preventDefault(); setJoining(true); setAccessError('')
     try {
-      const response = await fetch('/api/rooms', { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ roomName: newRoomName, password: newRoomPassword }) }); const result = await response.json()
+      const response = await fetch('/api/rooms', { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ roomName: newRoomName, password: newRoomPassword, permanent: newRoomPermanent }) }); const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Não foi possível criar a sala.')
       setCreatingRoom(false); setNewRoomName(''); await loadRooms(); await joinRoom(result.room, newRoomPassword); setNewRoomPassword('')
     } catch (error) { setAccessError(error.message); setJoining(false) }
   }
-  const leaveRoom = () => { stopSharing(false); socketRef.current?.close(); knownUsersRef.current = null; setAccessSession(''); setRoomName(''); setJoined(false); setUsers([]); setRemoteScreens({}); setMessages([]); setUnreadChat(0); setNotice('Você saiu da sala.') }
-  const logoutSite = () => { leaveRoom(); localStorage.removeItem('screen-share-site-session'); setSiteSession(''); setSiteRole('member'); setAccessError('') }
+  const leaveRoom = () => { stopSharing(false); socketRef.current?.close(); knownUsersRef.current = null; setAccessSession(''); setRoomName(''); setJoined(false); setUsers([]); setRemoteScreens({}); setMessages([]); setUnreadChat(0); setCoOwners([]); setRoomClosing(null); setRoomPermanent(false); setNotice('Você saiu da sala.') }
+  const logoutSite = () => { leaveRoom(); roomSeats.clear(); localStorage.removeItem('screen-share-site-session'); setSiteSession(''); setAccessError('') }
 
   const getCapture = async () => {
     if (localStreamRef.current?.getVideoTracks()[0]?.readyState === 'live') return localStreamRef.current
@@ -1309,7 +1360,7 @@ export default function App() {
     // On the native path the pipeline is the sender: it produces the offer, which arrives asynchronously
     // and is put on the socket from the effect above. No RTCPeerConnection is created here at all.
     if (nativeActiveRef.current) {
-      nativeViewersRef.current.set(connectionId, peerId)
+      nativeViewersRef.current.set(connectionId, { peerId, mode })
       const added = await nativeRef.current?.addViewer(connectionId)
       if (!added) {
         nativeViewersRef.current.delete(connectionId)
@@ -1365,6 +1416,53 @@ export default function App() {
   }
   const watch = (user) => { setRemoteScreens((current) => ({ ...current, [`waiting-${user.id}`]: { peerId: user.id, waiting: true } })); send({ type: 'watch-request', to: user.id, mode: watchMode }); setNotice(`Conectando à tela de ${user.name}…`) }
   const moderate = (user, action) => send({ type: 'moderate', to: user.id, action })
+  // Appointing is only offered where it means something: a temporary room has nothing to hand over.
+  const setCoOwner = (user, wanted) => send({ type: wanted ? 'promote' : 'demote', to: user.id })
+  const isCoOwner = (user) => coOwners.includes(user.id)
+
+  // Deleting asks for the room's password when it has one, because standing here rests on a name
+  // anybody can type -- the password is what proves you could have walked in.
+  const confirmDelete = async () => {
+    const room = deleting
+    setJoining(true); setAccessError('')
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(room.id)}/delete`, {
+        method: 'POST', headers: authHeaders(true), body: JSON.stringify({ password: deletePassword }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Não foi possível apagar a sala.')
+      setDeleting(null); setDeletePassword('')
+      setAccessError(result.deleted ? '' : `A sala será apagada em ${new Date(result.deleteAfter).toLocaleString('pt-BR')}. O dono pode cancelar até lá.`)
+      await loadRooms()
+    } catch (error) { setAccessError(error.message) } finally { setJoining(false) }
+  }
+  const keepRoom = async (room) => {
+    setJoining(true); setAccessError('')
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(room.id)}/keep`, {
+        method: 'POST', headers: authHeaders(true), body: JSON.stringify({ password: deletePassword }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Não foi possível cancelar.')
+      await loadRooms()
+    } catch (error) { setAccessError(error.message) } finally { setJoining(false) }
+  }
+  // Straight to the server over HTTP rather than through the socket: a photo would not fit in a frame,
+  // and holding the signalling socket open for it would stall the live while it uploads.
+  const uploadFile = async (file) => {
+    setUploading(true)
+    try {
+      const response = await fetch('/api/room/files', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${accessSession}`, 'content-type': 'application/octet-stream', 'x-file-name': encodeURIComponent(file.name) },
+        body: file,
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(result?.error || 'Não foi possível enviar o arquivo.')
+      setShowChat(true)
+    } catch (error) { setNotice(error.message) } finally { setUploading(false) }
+  }
+
   const sendChat = () => {
     const text = chatDraft.trim()
     if (!text) return
@@ -1420,15 +1518,16 @@ export default function App() {
     .filter((column) => column.length)
 
   const panelById = {
-    people: <section {...peoplePanel.box}><div {...peoplePanel.grip} className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'superadmin' ? ' · SUPER ADM' : user.role === 'admin' ? ' · ADM' : user.role === 'owner' ? ' · DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}{user.voice ? ' · no áudio' : ''}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isAdmin && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="admin-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="admin-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div>{voiceJoined && user.voice && user.id !== selfId && <div className="person-voice"><span className={`voice-meter small${voiceDeafened || voiceVolumes[user.name] === 0 ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.peers?.[user.name] || 0)})` }} /></span><input type="range" min="0" max={MAX_VOLUME} step="5" value={voiceVolumes[user.name] ?? DEFAULT_VOLUME} onChange={(event) => setPeerVolume(user.name, event.target.value)} aria-label={`Volume de ${user.name} para você`} /><b>{voiceVolumes[user.name] ?? DEFAULT_VOLUME}%</b></div>}</article>)}</div></section>,
+    people: <section {...peoplePanel.box}><div {...peoplePanel.grip} className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'owner' ? ' · DONO' : isCoOwner(user) ? ' · CO-DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}{user.voice ? ' · no áudio' : ''}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isOwner && roomPermanent && <button className={`moderation-action${isCoOwner(user) ? ' on' : ''}`} title={isCoOwner(user) ? 'Deixa de ser co-dono' : 'Tornar co-dono: poderá pedir a exclusão da sala'} onClick={() => setCoOwner(user, !isCoOwner(user))}><Star size={15} /></button>}{user.id !== selfId && isOwner && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="moderation-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="moderation-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div>{voiceJoined && user.voice && user.id !== selfId && <div className="person-voice"><span className={`voice-meter small${voiceDeafened || voiceVolumes[user.name] === 0 ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.peers?.[user.name] || 0)})` }} /></span><input type="range" min="0" max={MAX_VOLUME} step="5" value={voiceVolumes[user.name] ?? DEFAULT_VOLUME} onChange={(event) => setPeerVolume(user.name, event.target.value)} aria-label={`Volume de ${user.name} para você`} /><b>{voiceVolumes[user.name] ?? DEFAULT_VOLUME}%</b></div>}</article>)}</div></section>,
     stage: <section {...stagePanel.box}><div {...stagePanel.grip} className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>,
-    chat: <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} panel={chatPanel} />,
+    chat: <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} panel={chatPanel} onUpload={uploadFile} uploading={uploading} canUpload={roomPermanent} />,
     settings: <aside {...settingsPanel.box}><div {...settingsPanel.grip} className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented"><button type="button" className={fps === 30 ? 'selected' : ''} onClick={() => setFps(30)}>30</button><button type="button" className={fps === 60 ? 'selected' : ''} onClick={() => setFps(60)}>60</button></div><p className="hint">É uma preferência. O navegador, a tela e a GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p></fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>,
   }
 
-  if (!siteSession) return <main className="shell login-shell"><section className="login-card"><div className="brand-mark"><MonitorUp size={28} /></div><p className="eyebrow">TelasShare</p><h1>Entre para encontrar seus amigos.</h1><p className="intro">Usuários comuns precisam apenas escolher um nome. As salas continuam protegidas por suas próprias senhas.</p><form className="login-form" onSubmit={loginSite}><label htmlFor="name">Seu nome de usuário</label><input id="name" value={name} onChange={(event) => setName(event.target.value)} maxLength={32} placeholder="Ex.: Diego" autoFocus />{adminMode && <><label htmlFor="password">Senha administrativa</label><input id="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} maxLength={128} placeholder="Senha de ADM" autoComplete="current-password" autoFocus /></>}<button type="submit" disabled={joining}>{joining ? 'Entrando…' : adminMode ? 'Entrar como ADM' : 'Entrar no TelasShare'}</button><button type="button" className="admin-login-toggle" onClick={() => { setAdminMode((current) => !current); setPassword(''); setAccessError('') }}>{adminMode ? 'Voltar para usuário comum' : 'ADM'}</button>{accessError && <p className="access-error" role="alert">{accessError}</p>}</form><div className="login-links"><div className="trust-line"><ShieldCheck size={17} /><span>Dentro de uma sala, somente os participantes veem quem está presente.</span></div></div></section><BuildStamp /><GlobalActions /></main>
+  if (!siteSession) return <main className="shell login-shell"><section className="login-card"><div className="brand-mark"><MonitorUp size={28} /></div><p className="eyebrow">TelasShare</p><h1>Entre para encontrar seus amigos.</h1><p className="intro">Usuários comuns precisam apenas escolher um nome. As salas continuam protegidas por suas próprias senhas.</p><form className="login-form" onSubmit={loginSite}><label htmlFor="name">Seu nome de usuário</label><input id="name" value={name} onChange={(event) => setName(event.target.value)} maxLength={32} placeholder="Ex.: Diego" autoFocus /><button type="submit" disabled={joining}>{joining ? 'Entrando…' : 'Entrar no TelasShare'}</button>{accessError && <p className="access-error" role="alert">{accessError}</p>}</form><div className="login-links"><div className="trust-line"><ShieldCheck size={17} /><span>Dentro de uma sala, somente os participantes veem quem está presente.</span></div></div></section><BuildStamp /><GlobalActions /></main>
 
-  if (!joined) return <main className="shell lobby-shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>TelasShare</strong><span>Olá, {name}{siteRole === 'superadmin' ? ' · SUPER ADM' : siteRole === 'admin' ? ' · ADM' : ''}</span></div></div><div className="header-actions"><GlobalActions inline /><button className="leave-room" onClick={logoutSite}><LogOut size={15} />Sair do site</button></div></header><section className="lobby-heading"><div><p className="eyebrow">Lobby privado</p><h1>Escolha uma sala</h1><p>Somente o nome da sala aparece aqui. Usuários e transmissões continuam ocultos até você entrar.</p></div><button className="create-room-button" onClick={() => { setCreatingRoom(true); setAccessError('') }}><Plus size={17} />Criar sala</button></section>{accessError && !selectedRoom && !creatingRoom && <p className="lobby-error">{accessError}</p>}<section className="rooms-grid">{rooms.length ? rooms.map((room) => <button className="room-card" key={room.id} onClick={() => { setSelectedRoom(room); setRoomPassword(''); setAccessError(''); if (room.open) joinRoom(room, '') }}><div className="room-icon"><DoorOpen size={22} /></div><div><strong>{room.name}</strong><span>{room.open ? 'Sala aberta · entre sem senha' : siteRole === 'superadmin' ? 'Acesso de SUPER ADM' : 'Clique para informar a senha'}</span></div>{room.open ? <DoorOpen size={17} /> : <KeyRound size={17} />}</button>) : <div className="rooms-empty"><DoorOpen size={35} /><strong>Nenhuma sala criada</strong><span>Crie a primeira sala e compartilhe a senha somente com quem você quiser.</span></div>}</section><BuildStamp />{selectedRoom && !selectedRoom.open && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={(event) => { event.preventDefault(); joinRoom(selectedRoom) }}><button type="button" className="modal-close" onClick={() => setSelectedRoom(null)}><X size={17} /></button><div className="request-icon"><KeyRound size={25} /></div><p className="eyebrow">Sala privada</p><h3>{selectedRoom.name}</h3>{siteRole === 'superadmin' ? <p>Você pode entrar usando sua permissão de SUPER ADM.</p> : <><label htmlFor="room-password">Senha da sala</label><input id="room-password" type="password" value={roomPassword} onChange={(event) => setRoomPassword(event.target.value)} autoFocus /></>} {accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Entrando…' : siteRole === 'superadmin' ? 'Entrar como SUPER ADM' : 'Entrar na sala'}</button></form></div>}{creatingRoom && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={createRoom}><button type="button" className="modal-close" onClick={() => setCreatingRoom(false)}><X size={17} /></button><div className="request-icon"><Plus size={25} /></div><p className="eyebrow">Nova sala</p><h3>Criar sala</h3><label htmlFor="new-room-name">Nome da sala</label><input id="new-room-name" value={newRoomName} onChange={(event) => setNewRoomName(event.target.value)} maxLength={40} autoFocus /><label htmlFor="new-room-password">Senha da sala <small>(opcional)</small></label><input id="new-room-password" type="password" value={newRoomPassword} onChange={(event) => setNewRoomPassword(event.target.value)} maxLength={128} placeholder="Deixe em branco para uma sala aberta" /><p className="hint">Sem senha, qualquer pessoa que esteja no site entra direto. Com senha, só quem a tiver.</p>{accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Criando…' : 'Criar e entrar'}</button></form></div>}</main>
+  if (!joined) return <main className="shell lobby-shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>TelasShare</strong><span>Olá, {name}</span></div></div><div className="header-actions"><GlobalActions inline /><button className="leave-room" onClick={logoutSite}><LogOut size={15} />Sair do site</button></div></header><section className="lobby-heading"><div><p className="eyebrow">Lobby privado</p><h1>Escolha uma sala</h1><p>Somente o nome da sala aparece aqui. Usuários e transmissões continuam ocultos até você entrar.</p></div><button className="create-room-button" onClick={() => { setCreatingRoom(true); setAccessError('') }}><Plus size={17} />Criar sala</button></section>{accessError && !selectedRoom && !creatingRoom && <p className="lobby-error">{accessError}</p>}<section className="rooms-grid">{rooms.length ? rooms.map((room) => <div className="room-entry" key={room.id}>{(room.owned || room.coOwner) && <div className="room-tools">{room.deleteAfter && (room.owned || room.coOwner) ? <button type="button" className="room-keep" title="Cancelar a exclusão" onClick={() => keepRoom(room)}><RotateCcw size={14} />Manter</button> : null}<button type="button" className="room-delete" title={room.owned ? 'Apagar esta sala' : 'Pedir a exclusão (leva 3 dias)'} onClick={() => { setDeleting(room); setDeletePassword(''); setAccessError('') }}>{room.owned ? <Trash2 size={14} /> : <Timer size={14} />}{room.owned ? 'Apagar' : 'Pedir exclusão'}</button></div>} <button className="room-card" onClick={() => enterRoom(room)}><div className="room-icon"><DoorOpen size={22} /></div><div><strong>{room.name}{room.permanent ? <b className="room-badge" title="Sala permanente"><Star size={11} />permanente</b> : ''}</strong><span>{room.deleteAfter ? `será apagada em ${new Date(room.deleteAfter).toLocaleDateString('pt-BR')}${room.deleteByName ? ` · pedido de ${room.deleteByName}` : ''}` : room.open ? 'Sala aberta · entre sem senha' : roomSeats.get(room.id) ? 'Você já entrou aqui neste aparelho' : 'Clique para informar a senha'}</span></div>{room.open || roomSeats.get(room.id) ? <DoorOpen size={17} /> : <KeyRound size={17} />}</button></div>) : <div className="rooms-empty"><DoorOpen size={35} /><strong>Nenhuma sala criada</strong><span>Crie a primeira sala e compartilhe a senha somente com quem você quiser.</span></div>}</section><BuildStamp />{selectedRoom && !selectedRoom.open && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={(event) => { event.preventDefault(); joinRoom(selectedRoom) }}><button type="button" className="modal-close" onClick={() => setSelectedRoom(null)}><X size={17} /></button><div className="request-icon"><KeyRound size={25} /></div><p className="eyebrow">Sala privada</p><h3>{selectedRoom.name}</h3><><label htmlFor="room-password">Senha da sala</label><input id="room-password" type="password" value={roomPassword} onChange={(event) => setRoomPassword(event.target.value)} autoFocus /></> {accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Entrando…' : 'Entrar na sala'}</button></form></div>}{deleting && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={(event) => { event.preventDefault(); confirmDelete() }}><button type="button" className="modal-close" onClick={() => setDeleting(null)}><X size={17} /></button><div className="request-icon"><Trash2 size={25} /></div><p className="eyebrow">{deleting.owned ? 'Apagar sala' : 'Pedir exclusão'}</p><h3>{deleting.name}</h3><p>{deleting.owned ? 'A conversa e os arquivos desta sala serão apagados agora, e não há como desfazer.' : 'Você é co-dono. A sala será apagada daqui a 3 dias, e o dono pode cancelar até lá.'}</p>{!deleting.open && <><label htmlFor="delete-password">Senha da sala</label><input id="delete-password" type="password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} autoFocus /><p className="hint">Apagar exige a senha, não só ser o dono — é o que prova que você poderia entrar.</p></>}{accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Aguarde…' : deleting.owned ? 'Apagar para sempre' : 'Pedir exclusão'}</button></form></div>}
+    {creatingRoom && <div className="modal-backdrop"><form className="modal room-modal" onSubmit={createRoom}><button type="button" className="modal-close" onClick={() => setCreatingRoom(false)}><X size={17} /></button><div className="request-icon"><Plus size={25} /></div><p className="eyebrow">Nova sala</p><h3>Criar sala</h3><label htmlFor="new-room-name">Nome da sala</label><input id="new-room-name" value={newRoomName} onChange={(event) => setNewRoomName(event.target.value)} maxLength={40} autoFocus /><label className="room-kind"><input type="checkbox" checked={newRoomPermanent} onChange={(event) => setNewRoomPermanent(event.target.checked)} /><span><strong>Sala permanente</strong><small>Guarda a conversa e os arquivos. Uma sala comum some 15 segundos depois que todos saem.</small></span></label><label htmlFor="new-room-password">Senha da sala <small>(opcional)</small></label><input id="new-room-password" type="password" value={newRoomPassword} onChange={(event) => setNewRoomPassword(event.target.value)} maxLength={128} placeholder="Deixe em branco para uma sala aberta" /><p className="hint">Sem senha, qualquer pessoa que esteja no site entra direto. Com senha, só quem a tiver.</p>{accessError && <p className="access-error">{accessError}</p>}<button type="submit" disabled={joining}>{joining ? 'Criando…' : 'Criar e entrar'}</button></form></div>}</main>
 
   return <main className="shell"><header><div className="brand"><div className="brand-mark small"><MonitorUp size={21} /></div><div><strong>TelasShare</strong><span>Sala · {roomName}</span></div></div><div className="header-actions"><div className={`connection ${connection}`}><span className="pulse" />{connection === 'online' ? <Wifi size={15} /> : <WifiOff size={15} />}{connection === 'online' ? 'Conectado' : connection === 'connecting' ? 'Conectando' : 'Offline'}</div><GlobalActions inline /><button className="leave-room" onClick={leaveRoom}><LogOut size={15} />Sair da sala</button></div></header>
     {diagnosticsEnabled && <MediaDiagnostics peers={pcsRef} localStream={localStreamRef} />}
@@ -1436,6 +1535,7 @@ export default function App() {
     {showSelfPreview && (nativeActive ? previewStream : localStreamRef.current) && <SelfPreview stream={nativeActive ? previewStream : localStreamRef.current} routeLabel={routeLabel} outboundFpsLabel={outboundFpsLabel} onClose={closeSelfPreview} />}
     {!isBroadcasting && <button className="start-broadcast standalone" onClick={startBroadcast}><Radio size={18} />Iniciar transmissão</button>}
     {isBroadcasting && <div className="live-banner"><div><Radio size={18} /><strong>Você está transmitindo para {viewerNames.length} {viewerNames.length === 1 ? 'pessoa' : 'pessoas'}</strong><span>{viewerNames.join(', ')} · {nativeActive ? `captura nativa${nativeSourceName ? ` · ${nativeSourceName}` : ''}` : resolutions[resolution].label} · preferência {fps} FPS · {nativeActive ? (audioStatus === 'on' ? 'com som do sistema' : 'sem áudio') : audioStatus === 'on' ? 'com áudio' : audioStatus === 'unavailable' ? 'sem áudio (a origem escolhida não fornece som)' : 'sem áudio'}</span></div><div className="live-actions"><button className="preview-button" onClick={openSelfPreview}><Eye size={17} />Ver minha transmissão</button><button className="danger" onClick={() => stopSharing(true)}><CircleStop size={17} />Parar para todos</button></div></div>}
+    {roomClosing && <section className="room-closing-banner" role="alert"><Timer size={18} /><div><strong>Esta sala será apagada em {new Date(roomClosing.at).toLocaleString('pt-BR')}</strong><span>{roomClosing.byName ? `Pedido por ${roomClosing.byName}. ` : ''}O dono pode cancelar até lá, no lobby.</span></div></section>}
     <section className="notice" aria-live="polite"><span className="notice-dot" />{notice}</section>
     <section className="voice-bar" aria-label="Áudio da sala">{!voiceJoined
       ? <button type="button" className="voice-join" onClick={joinVoice}><PhoneCall size={17} /><span><strong>Entrar no áudio</strong><small>{users.filter((user) => user.voice).length ? `${users.filter((user) => user.voice).length} na conversa agora` : 'ninguém na conversa ainda'}</small></span></button>

@@ -118,10 +118,15 @@ const isCoOwner = (room, session) => {
   const wanted = nameKey(session?.name)
   return wanted ? [...room.coOwners.values()].some((name) => name === wanted) : false
 }
-// Deleting somebody else's file is a moderator's act, so it is the pair who already run the room. Not
-// the sender: a file in a shared room is the room's, and letting the sender remove it later would give
-// away a quiet form of control over what everyone else can still see.
+// Deleting somebody else's file is a moderator's act, so it is the pair who already run the room.
 const runsTheRoom = (room, session) => isOwner(room, session) || isCoOwner(room, session)
+
+// Whoever sent a file may take it back, and so may the people who run the room. Recognised by session
+// or by name, the same way ownership is: the alternative would be that sending something from the
+// desktop app and then opening the site leaves you unable to remove your own file.
+const canRemoveFile = (room, session, file) => runsTheRoom(room, session)
+  || file.from === session?.sub
+  || (file.fromName ? nameKey(file.fromName) === nameKey(session?.name) : false)
 
 // Whoever asked for the room to go, by either measure, so they can take it back from anywhere.
 const askedToDelete = (room, session) => room.deleteBy === session?.sub
@@ -424,8 +429,11 @@ app.get('/api/room/files', async (req, res) => {
     files: stored.map((file) => ({
       id: file.id, name: file.name, kind: file.kind, inline: file.inline, bytes: file.bytes,
       at: file.at, fromName: file.fromName ?? null, url: fileUrl(file.id),
+      canDelete: canRemoveFile(room, seat, file),
     })),
-    canDelete: runsTheRoom(room, seat),
+    // Whether this person may remove anything at all, which is what the conversation needs: a line there
+    // carries who wrote it, so the page can work out the rest without asking.
+    manages: runsTheRoom(room, seat),
   })
 })
 
@@ -436,11 +444,13 @@ app.post('/api/room/files/:id/delete', async (req, res) => {
   if (!seat) return res.status(401).json({ error: 'Entre na sala novamente.' })
   const room = rooms.get(seat.roomKey)
   if (!room) return res.status(404).json({ error: 'Sala não encontrada.' })
-  if (!runsTheRoom(room, seat)) return res.status(403).json({ error: 'Apenas o dono e os co-donos podem apagar arquivos.' })
   const file = await store.findFile(req.params.id)
   // Belonging to this room is checked rather than assumed: the address carries an id, and an id from
-  // another room must not be deletable by the people who run this one.
+  // another room must not be deletable by the people who run this one. Checked before the permission,
+  // so a file from elsewhere reads as absent rather than as forbidden -- answering "you may not" would
+  // confirm that it exists.
   if (!file || file.roomKey !== seat.roomKey) return res.status(404).json({ error: 'Arquivo não encontrado.' })
+  if (!canRemoveFile(room, seat, file)) return res.status(403).json({ error: 'Só quem enviou, o dono ou um co-dono pode apagar este arquivo.' })
 
   await fileStorage.remove(file.roomId, file.id)
   await store.deleteFile(file.id)

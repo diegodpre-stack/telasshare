@@ -79,19 +79,22 @@ const segundo = await upload(membro, 'foto-do-amigo.jpg', 400)
 const asOwner = await listing(dono)
 assert.equal(asOwner.status, 200)
 assert.equal(asOwner.body.files.length, 2, 'everything the room holds, whoever sent it')
-assert.equal(asOwner.body.canDelete, true, 'the owner is told they may delete')
+assert.equal(asOwner.body.manages, true, 'the owner runs the room')
+assert.ok(asOwner.body.files.every((file) => file.canDelete), 'and may remove any of them')
 assert.deepEqual(asOwner.body.files.map((file) => file.name), ['contrato.jpg', 'foto-do-amigo.jpg'], 'oldest first')
 assert.equal(asOwner.body.files[1].fromName, 'Amigo', 'and who sent it')
 assert.ok(asOwner.body.files[0].url.includes('token='), 'with an address that opens')
 assert.equal((await fetch(BASE + asOwner.body.files[0].url)).status, 200)
 // Nothing internal rides along: the path on disk and the hash are the server's business.
 for (const file of asOwner.body.files) {
-  assert.deepEqual(Object.keys(file).sort(), ['at', 'bytes', 'fromName', 'id', 'inline', 'kind', 'name', 'url'])
+  assert.deepEqual(Object.keys(file).sort(), ['at', 'bytes', 'canDelete', 'fromName', 'id', 'inline', 'kind', 'name', 'url'])
 }
 
 const asMember = await listing(membro)
 assert.equal(asMember.body.files.length, 2, 'everybody in the room sees the list')
-assert.equal(asMember.body.canDelete, false, 'but an ordinary member is told they may not')
+assert.equal(asMember.body.manages, false, 'an ordinary member does not run the room')
+// But their own file is theirs to take back, and only their own.
+assert.deepEqual(asMember.body.files.map((file) => [file.name, file.canDelete]), [['contrato.jpg', false], ['foto-do-amigo.jpg', true]])
 
 // --- the list outlives the conversation -------------------------------------
 // This is the whole reason the panel exists. A hundred and five lines pushes the first files out of the
@@ -111,9 +114,7 @@ assert.equal(afterTalking.body.files.length, 2, 'the files are still listed afte
 assert.equal((await fetch(BASE + afterTalking.body.files[0].url)).status, 200, 'and still downloadable')
 
 // --- who may not delete ------------------------------------------------------
-assert.equal((await removeFile(membro, primeiro.id)).status, 403, 'a member cannot delete')
-// Not even their own: a file in a shared room belongs to the room.
-assert.equal((await removeFile(membro, segundo.id)).status, 403, 'not even the one they sent themselves')
+assert.equal((await removeFile(membro, primeiro.id)).status, 403, "a member cannot delete somebody else's file")
 assert.equal((await removeFile(estranho, primeiro.id)).status, 401, 'a site session is not a room seat')
 assert.equal((await request('POST', `/api/room/files/${primeiro.id}/delete`, {})).status, 401, 'and nothing at all is refused')
 assert.equal((await listing(estranho)).status, 401, 'the list is not readable from outside the room either')
@@ -122,7 +123,20 @@ const outra = (await request('POST', '/api/rooms', { roomName: 'Outra sala', pas
 const outroDono = await seatIn(outra.id, amigo)
 const alheio = await upload(outroDono, 'de-outra-sala.jpg')
 assert.equal((await removeFile(dono, alheio.id)).status, 404, 'an id from another room is not found here')
+// Absent rather than forbidden, so the answer does not confirm that the file exists somewhere.
+assert.equal((await removeFile(membro, alheio.id)).status, 404, 'even for the person who sent it, from the wrong room')
 assert.equal((await listing(outroDono)).body.files.length, 1, 'and that room still has it')
+
+// --- the sender may take their own back --------------------------------------
+// Before any promotion: an ordinary member, deleting the file they sent and nothing else.
+const proprio = await upload(membro, 'meu-arquivo.jpg', 300)
+assert.equal((await removeFile(membro, proprio.id)).status, 200, 'their own file is theirs to remove')
+assert.ok(!existsSync(join(filesDir, room.id, proprio.id)), 'and the bytes go with it')
+// The same person arriving from another machine is a different session and the same person by name.
+const outroPc = await seatIn(room.id, await login('Amigo'))
+const doOutroPc = await upload(membro, 'de-outro-pc.jpg', 300)
+assert.equal((await listing(outroPc)).body.files.find((file) => file.id === doOutroPc.id).canDelete, true, 'recognised by name, as ownership is')
+assert.equal((await removeFile(outroPc, doOutroPc.id)).status, 200)
 
 // --- a co-owner may ----------------------------------------------------------
 const promoter = new WebSocket(`ws://127.0.0.1:8803/?session=${encodeURIComponent(dono)}`)
@@ -137,7 +151,8 @@ await new Promise((resolve) => setTimeout(resolve, 300))
 const amigoId = seen.find((entry) => entry.type === 'welcome')?.id
 promoter.send(JSON.stringify({ type: 'promote', to: amigoId }))
 await new Promise((resolve) => setTimeout(resolve, 400))
-assert.equal((await listing(membro)).body.canDelete, true, 'a co-owner is told they may delete')
+assert.equal((await listing(membro)).body.manages, true, 'a co-owner runs the room')
+assert.ok((await listing(membro)).body.files.every((file) => file.canDelete), 'and may remove anything')
 
 // --- and deleting takes the bytes with it ------------------------------------
 const onDisk = join(filesDir, room.id, segundo.id)
@@ -162,4 +177,4 @@ assert.equal(afterRestart.body.files.length, 1, 'the deletion survived')
 assert.equal(afterRestart.body.files[0].name, 'contrato.jpg')
 
 cleanUp()
-console.log('PASS: the room lists every file it holds, oldest first and with who sent it, and keeps listing them after the conversation has rolled past a hundred lines; a member sees the list but cannot delete, not even their own file, an outsider cannot even read it, and an id from another room is not found; a co-owner can, and deleting removes the row, the bytes on disk and the message, tells everybody in the room, invalidates addresses already handed out, and stays deleted across a restart.')
+console.log('PASS: the room lists every file it holds, oldest first and with who sent it, and keeps listing them after the conversation has rolled past a hundred lines; whoever sent a file may take it back and is recognised by name from another machine, a member cannot touch what somebody else sent, an outsider cannot even read the list, and an id from another room reads as absent rather than forbidden; the owner and co-owners may remove anything, and deleting removes the row, the bytes on disk and the message, tells everybody in the room, invalidates addresses already handed out, and stays deleted across a restart.')

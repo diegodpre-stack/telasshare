@@ -218,3 +218,21 @@
 .chat-file strong,.chat-file small{display:block}
 .chat-file strong{font-size:11px;overflow-wrap:anywhere}
 .chat-file small{font-size:9px;color:#7f93a6;margin-top:2px}
+
+/* The list of everything the room holds, and the button that takes one away. The delete sits on the
+   file rather than in a menu: it belongs to the owners, and hiding it would only mean hunting for it. */
+.panel.files{height:420px;display:flex;flex-direction:column}
+.panel.files .panel-heading{flex:none;gap:10px}
+.files-list{flex:1;overflow-y:auto;padding:10px 15px 14px;display:flex;flex-direction:column;gap:8px}
+.file-row{display:flex;align-items:center;gap:8px}
+.file-row>a{flex:1;min-width:0;display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid #2a4056;background:#0c1a28;border-radius:9px;text-decoration:none;color:#c3d1dd}
+.file-row>a:hover{border-color:#41ca9f}
+.file-row strong,.file-row small{display:block}
+.file-row strong{font-size:11px;overflow-wrap:anywhere}
+.file-row small{font-size:9px;color:#7f93a6;margin-top:2px}
+.chat-file-wrap{display:flex;align-items:flex-start;gap:6px}
+.chat-file-wrap>a,.chat-file-wrap>video,.chat-file-wrap>audio{flex:1;min-width:0}
+.file-delete{flex:none;width:28px;height:28px;display:grid;place-items:center;padding:0;background:#27191f;border:1px solid #5b343c;color:#ff9ba2;border-radius:8px}
+.file-delete:hover{border-color:#ff6b74;background:#33202a}
+.files-list .empty{gap:8px}
+.files-list .empty button{margin-top:10px}

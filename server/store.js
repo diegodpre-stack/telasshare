@@ -35,6 +35,8 @@ const unavailable = (reason) => ({
   addMessage: () => Promise.resolve(),
   addFile: () => Promise.resolve(),
   listFiles: () => Promise.resolve([]),
+  deleteFile: () => Promise.resolve(),
+  removeMessageWithFile: () => Promise.resolve(),
   findFile: () => Promise.resolve(null),
   roomUsage: () => Promise.resolve(0),
   deleteFilesForRoom: () => Promise.resolve(),
@@ -201,6 +203,19 @@ export function createStore({ uri = process.env.MONGODB_URI, database = process.
         { $group: { _id: null, bytes: { $sum: '$bytes' } } },
       ]).toArray()
       return row?.bytes || 0
+    },
+
+    deleteFile(id) {
+      return write(`file ${id}`, () => files.deleteOne({ _id: id }))
+    },
+
+    // The message that carried the file goes with it. Without this the conversation would keep a line
+    // pointing at nothing, which reads as a bug to everyone who sees it.
+    removeMessageWithFile(key, fileId) {
+      return write(`message of file ${fileId}`, () => rooms.updateOne(
+        { _id: key },
+        { $pull: { messages: { 'file.id': fileId } } },
+      ))
     },
 
     deleteFilesForRoom(roomKey) {

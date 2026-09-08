@@ -25,7 +25,7 @@ import { createVoiceInput, MAX_THRESHOLD_DB, MIN_THRESHOLD_DB } from './voiceInp
 import { splitLinks } from './chatLinks.js'
 import { createPanelLayout, dropRegion } from './panelLayout.js'
 import { createRoomSeats } from './roomSeats.js'
-import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, HeadphoneOff, Headphones, KeyRound, LogOut, MessageSquare, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Paperclip, Plus, Radio, RotateCcw, Send, ShieldCheck, Star, Timer, Trash2, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
+import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, FolderOpen, HeadphoneOff, Headphones, KeyRound, LogOut, MessageSquare, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Paperclip, Plus, Radio, RotateCcw, Send, ShieldCheck, Star, Timer, Trash2, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const roomSeats = createRoomSeats()
 
@@ -297,12 +297,13 @@ const readableSize = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed
 // its signature comes back to life. A picture repairs itself the moment it fails to load; a file being
 // downloaded is checked first, because sending somebody to a page reading "Link expirado." when the fix
 // takes half a second and no decision from them is a bad way to answer a click.
-function ChatFile({ file, onStale }) {
+function ChatFile({ file, onStale, onDelete }) {
+  const remove = onDelete && <button type="button" className="file-delete" title="Apagar este arquivo para todos" onClick={() => onDelete(file)}><Trash2 size={14} /></button>
   if (file.inline && file.kind.startsWith('image/')) {
-    return <a className="chat-image" href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} loading="lazy" onError={onStale} /></a>
+    return <div className="chat-file-wrap"><a className="chat-image" href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} loading="lazy" onError={onStale} /></a>{remove}</div>
   }
-  if (file.inline && file.kind.startsWith('video/')) return <video className="chat-video" src={file.url} controls preload="metadata" onError={onStale} />
-  if (file.inline && file.kind.startsWith('audio/')) return <audio src={file.url} controls preload="metadata" onError={onStale} />
+  if (file.inline && file.kind.startsWith('video/')) return <div className="chat-file-wrap"><video className="chat-video" src={file.url} controls preload="metadata" onError={onStale} />{remove}</div>
+  if (file.inline && file.kind.startsWith('audio/')) return <div className="chat-file-wrap"><audio src={file.url} controls preload="metadata" onError={onStale} />{remove}</div>
   const open = async (event) => {
     event.preventDefault()
     // HEAD rather than GET: the answer needed is only whether the address still opens, and fetching the
@@ -311,10 +312,33 @@ function ChatFile({ file, onStale }) {
     if (usable) { window.open(file.url, '_blank', 'noopener'); return }
     onStale?.()
   }
-  return <a className="chat-file" href={file.url} target="_blank" rel="noopener noreferrer" download={file.name} onClick={open}><Paperclip size={15} /><span><strong>{file.name}</strong><small>{readableSize(file.bytes)}</small></span></a>
+  return <div className="chat-file-wrap"><a className="chat-file" href={file.url} target="_blank" rel="noopener noreferrer" download={file.name} onClick={open}><Paperclip size={15} /><span><strong>{file.name}</strong><small>{readableSize(file.bytes)}</small></span></a>{remove}</div>
 }
 
-function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel, onUpload, uploading, canUpload, onStale }) {
+// Everything the room has ever been sent, which is not the same as everything still mentioned in the
+// conversation: that keeps only its last hundred lines, so a file from a month ago has scrolled out of
+// existence there while still sitting on the disk. This is the list that does not forget.
+function FilesPanel({ files, loading, error, onClose, onReload, onDelete, panel }) {
+  const total = files.reduce((sum, file) => sum + (file.bytes || 0), 0)
+  return <section {...panel.box}>
+    <div {...panel.grip} className="panel-heading">
+      <div><p className="eyebrow">Tudo que foi enviado</p><h2>Arquivos da sala</h2></div>
+      <span className="count"><FolderOpen size={15} />{files.length}{total ? ` · ${readableSize(total)}` : ''}</span>
+      <button className="chat-close" title="Fechar arquivos" onClick={onClose}><X size={16} /></button>
+    </div>
+    <div className="files-list">
+      {loading && !files.length && <div className="empty"><FolderOpen size={28} /><strong>Carregando…</strong></div>}
+      {error && <div className="empty"><FolderOpen size={28} /><strong>Não foi possível listar</strong><span>{error}</span><button type="button" className="people-toggle" onClick={onReload}><RotateCcw size={15} /><span>Tentar de novo</span></button></div>}
+      {!loading && !error && !files.length && <div className="empty"><FolderOpen size={28} /><strong>Nenhum arquivo ainda</strong><span>O que for enviado na conversa aparece aqui, e continua aqui mesmo depois de sair do histórico.</span></div>}
+      {files.map((file) => <article className="file-row" key={file.id}>
+        <a href={file.url} target="_blank" rel="noopener noreferrer" download={file.name}><Paperclip size={15} /><span><strong>{file.name}</strong><small>{readableSize(file.bytes)}{file.fromName ? ` · ${file.fromName}` : ''} · {new Date(file.at).toLocaleDateString('pt-BR')}</small></span></a>
+        {onDelete && <button type="button" className="file-delete" title="Apagar para todos, do disco também" onClick={() => onDelete(file)}><Trash2 size={14} /></button>}
+      </article>)}
+    </div>
+  </section>
+}
+
+function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel, onUpload, uploading, canUpload, onStale, onDeleteFile }) {
   const listRef = useRef(null)
   const atBottomRef = useRef(true)
   // Following the conversation should not fight somebody reading back through it, so new messages only
@@ -334,7 +358,7 @@ function ChatPanel({ messages, selfId, draft, onDraft, onSend, onClose, panel, o
       {messages.length === 0 && <div className="empty"><MessageSquare size={28} /><strong>Nada por aqui ainda</strong><span>As mensagens somem quando a sala fica vazia.</span></div>}
       {messages.map((message) => <article className={`chat-message${message.from === selfId ? ' self' : ''}`} key={message.id}>
         <header><strong>{message.from === selfId ? 'Você' : message.fromName}</strong><time>{new Date(message.at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
-        {message.file && <ChatFile file={message.file} onStale={onStale} />}
+        {message.file && <ChatFile file={message.file} onStale={onStale} onDelete={onDeleteFile} />}
         {message.text ? <p><ChatText text={message.text} /></p> : null}
       </article>)}
     </div>
@@ -439,6 +463,11 @@ export default function App() {
   useEffect(() => { broadcastingRef.current = broadcasting }, [broadcasting])
   const [showPeople, setShowPeople] = useState(true)
   const [showChat, setShowChat] = useState(false)
+  const [showFiles, setShowFiles] = useState(false)
+  const [roomFiles, setRoomFiles] = useState([])
+  const [filesLoading, setFilesLoading] = useState(false)
+  const [filesError, setFilesError] = useState('')
+  const [canDeleteFiles, setCanDeleteFiles] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   // What the room tells us about itself on arrival, and keeps us posted on afterwards.
   const [roomPermanent, setRoomPermanent] = useState(false)
@@ -524,6 +553,32 @@ export default function App() {
     })
   }, [fps, resolution, readTransmissionSettings])
   const send = useCallback((message) => { if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message)) }, [])
+  // The list comes from the file index rather than from the conversation, so it holds everything the
+  // room has been sent -- including what the hundred-message history has long since dropped.
+  const loadFiles = useCallback(async () => {
+    if (!accessSession) return
+    setFilesLoading(true); setFilesError('')
+    try {
+      const response = await fetch('/api/room/files', { headers: { authorization: `Bearer ${accessSession}` } })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Não foi possível listar os arquivos.')
+      setRoomFiles(Array.isArray(result.files) ? result.files : [])
+      setCanDeleteFiles(result.canDelete === true)
+    } catch (error) { setFilesError(error.message) } finally { setFilesLoading(false) }
+  }, [accessSession])
+
+  const deleteFile = async (file) => {
+    if (!accessSession) return
+    // Asked plainly, because it takes the file off the disk and there is no undoing it.
+    if (!window.confirm(`Apagar "${file.name}" para todos? O arquivo sai do disco e não há como voltar atrás.`)) return
+    try {
+      const response = await fetch(`/api/room/files/${encodeURIComponent(file.id)}/delete`, { method: 'POST', headers: { authorization: `Bearer ${accessSession}` } })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Não foi possível apagar o arquivo.')
+      // The socket tells everybody, this one included, so nothing is removed here.
+    } catch (error) { setNotice(error.message) }
+  }
+
   // Asking for the conversation again, which is how an expired file address repairs itself. Coalesced,
   // because a conversation with twenty stale photos produces twenty errors in the same instant and they
   // all want the identical answer.
@@ -632,6 +687,10 @@ export default function App() {
 
   useEffect(() => { isNativeCaptureAvailable().then(setNativeAvailable).catch(() => setNativeAvailable(false)) }, [])
   useEffect(() => { localStorage.setItem('entretelas-captura-nativa', nativeWanted ? '1' : '0') }, [nativeWanted])
+
+  // Loaded when the panel is opened rather than on joining: a room nobody opens the list in should not
+  // pay for the query, and a room somebody does open should not show a list that is a day old.
+  useEffect(() => { if (joined && showFiles) loadFiles() }, [joined, showFiles, loadFiles])
 
   // A tab left open outlives the addresses inside it. Renewing when somebody comes back to the window
   // means the repair almost always happens before anything looks broken, and the failure handlers below
@@ -1180,6 +1239,11 @@ export default function App() {
         else if (message.type === 'room-kept') { setRoomClosing(null); setNotice('A exclusão da sala foi cancelada.') }
         else if (message.type === 'room-closed') { setAccessSession(''); setJoined(false); setNotice('Esta sala foi encerrada.') }
         else if (message.type === 'chat-history') setMessages(Array.isArray(message.messages) ? message.messages : [])
+        else if (message.type === 'file-removed' && message.id) {
+          // Out of the list and out of the conversation at once, for everybody in the room.
+          setRoomFiles((current) => current.filter((file) => file.id !== message.id))
+          setMessages((current) => current.filter((entry) => entry.file?.id !== message.id))
+        }
         else if (message.type === 'chat-links' && Array.isArray(message.links)) {
           // Renewed addresses for files already on screen. Patched in place so nothing moves, nothing
           // is lost, and a picture that had failed to load tries again with an address that works.
@@ -1309,7 +1373,7 @@ export default function App() {
       setCreatingRoom(false); setNewRoomName(''); await loadRooms(); await joinRoom(result.room, newRoomPassword); setNewRoomPassword('')
     } catch (error) { setAccessError(error.message); setJoining(false) }
   }
-  const leaveRoom = () => { stopSharing(false); socketRef.current?.close(); knownUsersRef.current = null; setAccessSession(''); setRoomName(''); setJoined(false); setUsers([]); setRemoteScreens({}); setMessages([]); setUnreadChat(0); setCoOwners([]); setRoomClosing(null); setRoomPermanent(false); setNotice('Você saiu da sala.') }
+  const leaveRoom = () => { stopSharing(false); socketRef.current?.close(); knownUsersRef.current = null; setAccessSession(''); setRoomName(''); setJoined(false); setUsers([]); setRemoteScreens({}); setMessages([]); setUnreadChat(0); setCoOwners([]); setRoomFiles([]); setShowFiles(false); setCanDeleteFiles(false); setFilesError(''); setRoomClosing(null); setRoomPermanent(false); setNotice('Você saiu da sala.') }
   const logoutSite = () => { leaveRoom(); roomSeats.clear(); localStorage.removeItem('screen-share-site-session'); setSiteSession(''); setAccessError('') }
 
   const getCapture = async () => {
@@ -1552,10 +1616,11 @@ export default function App() {
   const peoplePanel = panelProps('people', 'people')
   const stagePanel = panelProps('stage', 'stage multi-stage')
   const chatPanel = panelProps('chat', 'chat')
+  const filesPanel = panelProps('files', 'files')
   const settingsPanel = panelProps('settings', 'settings')
   // A column is drawn only if something in it is on screen, so closing a panel takes its column's gap
   // with it rather than leaving a hole in the row.
-  const panelIsOpen = { people: showPeople, stage: true, chat: showChat, settings: showSettings }
+  const panelIsOpen = { people: showPeople, stage: true, chat: showChat, files: showFiles, settings: showSettings }
   const visibleColumns = layoutRef.current.columns
     .map((column) => column.filter((id) => panelIsOpen[id]))
     .filter((column) => column.length)
@@ -1563,7 +1628,8 @@ export default function App() {
   const panelById = {
     people: <section {...peoplePanel.box}><div {...peoplePanel.grip} className="panel-heading"><div><p className="eyebrow">Sala privada · {roomName}</p><h2>Amigos online</h2></div><span className="count"><Users size={15} />{users.length}</span></div><div className="people-list">{peers.length === 0 && <div className="empty"><Users size={28} /><strong>Só você por aqui</strong><span>Compartilhe o nome desta sala com seus amigos.</span></div>}{users.map((user) => <article className={`person${user.id === selfId ? ' self' : ''}`} key={user.id}><div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div><div><strong>{user.name}{user.id === selfId ? ' · você' : ''}{user.role === 'owner' ? ' · DONO' : isCoOwner(user) ? ' · CO-DONO' : ''}</strong><span><i className={user.broadcasting ? 'live-user' : ''} />{user.broadcasting ? ' transmitindo agora' : ' online'}{user.voice ? ' · no áudio' : ''}</span></div><div className="person-actions">{user.id !== selfId && <button disabled={!user.broadcasting || Object.values(remoteScreens).some((screen) => screen.peerId === user.id)} onClick={() => watch(user)}><Cast size={16} />{user.broadcasting ? 'Assistir' : 'Sem tela'}</button>}{user.id !== selfId && isOwner && roomPermanent && <button className={`moderation-action${isCoOwner(user) ? ' on' : ''}`} title={isCoOwner(user) ? 'Deixa de ser co-dono' : 'Tornar co-dono: poderá pedir a exclusão da sala'} onClick={() => setCoOwner(user, !isCoOwner(user))}><Star size={15} /></button>}{user.id !== selfId && isOwner && roleRanks[moderationRole] > roleRanks[user.role] && <><button className="moderation-action" title="Expulsar" onClick={() => moderate(user, 'kick')}><UserX size={15} /></button><button className="moderation-action ban" title="Banir" onClick={() => moderate(user, 'ban')}><Ban size={15} /></button></>}</div>{voiceJoined && user.voice && user.id !== selfId && <div className="person-voice"><span className={`voice-meter small${voiceDeafened || voiceVolumes[user.name] === 0 ? ' silent' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.peers?.[user.name] || 0)})` }} /></span><input type="range" min="0" max={MAX_VOLUME} step="5" value={voiceVolumes[user.name] ?? DEFAULT_VOLUME} onChange={(event) => setPeerVolume(user.name, event.target.value)} aria-label={`Volume de ${user.name} para você`} /><b>{voiceVolumes[user.name] ?? DEFAULT_VOLUME}%</b></div>}</article>)}</div></section>,
     stage: <section {...stagePanel.box}><div {...stagePanel.grip} className="panel-heading stage-tools"><div><p className="eyebrow">Visualização simultânea</p><h2>{remoteEntries.length ? `${remoteEntries.length} ${remoteEntries.length === 1 ? 'tela aberta' : 'telas abertas'}` : 'As transmissões aparecerão aqui'}</h2></div><label className="size-control">Tamanho<select value={screenSize} onChange={(event) => setScreenSize(event.target.value)}><option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option></select></label></div><div className={`screens-grid grid-${screenSize}`}>{remoteEntries.length ? remoteEntries.map(([id, screen]) => <RemoteScreen key={id} screen={screen} size={screenSize} name={userName(screen.peerId)} onStop={() => id.startsWith('waiting-') ? setRemoteScreens((current) => { const next = { ...current }; delete next[id]; return next }) : closeConnection(id, true)} />) : <div className="multi-empty"><div className="screen-outline"><Cast size={35} /></div><strong>Pronto para várias telas</strong><span>Você pode assistir seus amigos enquanto continua transmitindo a sua.</span></div>}</div></section>,
-    chat: <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} panel={chatPanel} onUpload={uploadFile} uploading={uploading} canUpload={roomPermanent} onStale={refreshLinks} />,
+    chat: <ChatPanel messages={messages} selfId={selfId} draft={chatDraft} onDraft={setChatDraft} onSend={sendChat} onClose={() => setShowChat(false)} panel={chatPanel} onUpload={uploadFile} uploading={uploading} canUpload={roomPermanent} onStale={refreshLinks} onDeleteFile={canDeleteFiles ? deleteFile : null} />,
+    files: <FilesPanel files={roomFiles} loading={filesLoading} error={filesError} onClose={() => setShowFiles(false)} onReload={loadFiles} onDelete={canDeleteFiles ? deleteFile : null} panel={filesPanel} />,
     settings: <aside {...settingsPanel.box}><div {...settingsPanel.grip} className="panel-heading"><div><p className="eyebrow">Sua transmissão</p><h2>Qualidade</h2></div><SlidersHorizontal size={19} /></div><fieldset disabled={!!localStreamRef.current}><label>Resolução</label><div className="segmented">{Object.entries(resolutions).map(([key, value]) => <button type="button" className={resolution === key ? 'selected' : ''} key={key} onClick={() => setResolution(key)}>{value.label}</button>)}</div><p className="hint">A captura sempre usa o tamanho nativo da sua tela; a redução acontece no envio. Pedir um tamanho menor na captura obriga o navegador a encolher cada quadro e custa FPS antes mesmo de codificar.</p><label>FPS preferido</label><div className="segmented"><button type="button" className={fps === 30 ? 'selected' : ''} onClick={() => setFps(30)}>30</button><button type="button" className={fps === 60 ? 'selected' : ''} onClick={() => setFps(60)}>60</button></div><p className="hint">É uma preferência. O navegador, a tela e a GPU determinam o valor efetivo.</p><label>Codec de vídeo</label><div className="segmented five">{Object.entries(codecChoices).map(([key, label]) => <button type="button" className={preferredCodec === key ? 'selected' : ''} key={key} onClick={() => setPreferredCodec(key)}>{label}</button>)}</div><p className="hint">Automático prioriza os perfis que o navegador informa como eficientes. Confirme “Implementação” e “Encoder eficiente informado” durante uma transmissão com espectador; OpenH264 é software.</p><label>Áudio</label><div className="segmented"><button type="button" className={shareAudio ? 'selected' : ''} onClick={() => setShareAudio(true)}>Transmitir som</button><button type="button" className={!shareAudio ? 'selected' : ''} onClick={() => setShareAudio(false)}>Somente vídeo</button></div><p className="hint">Aba: somente o áudio dela, com o aviso de compartilhamento obrigatório do navegador. Janela: tentamos capturar apenas o som da janela quando o navegador oferecer essa opção. Tela inteira: áudio do sistema.</p></fieldset><div className="safety"><ShieldCheck size={18} /><p><strong>Entrada livre para assistir</strong><span>Quem estiver na sala pode clicar e acompanhar.</span></p></div></aside>,
   }
 
@@ -1585,7 +1651,7 @@ export default function App() {
       : <><div className="voice-self"><span className={`voice-meter input${voiceMuted ? ' silent' : voiceLevels.open ? ' open' : ''}`}><i style={{ transform: `scaleX(${Math.max(0.02, voiceLevels.self || 0)})` }} /><b style={{ left: `${Math.round((voiceLevels.thresholdLevel || 0) * 100)}%` }} /></span><div><strong>Você está no áudio</strong><small>{voiceMuted ? 'microfone desligado' : voiceStatus}</small></div></div><div className="voice-actions"><button type="button" className={voiceMuted ? 'off' : ''} onClick={toggleMute} aria-pressed={voiceMuted}>{voiceMuted ? <MicOff size={16} /> : <Mic size={16} />}{voiceMuted ? 'Microfone desligado' : 'Microfone ligado'}</button><button type="button" className={voiceDeafened ? 'off' : ''} onClick={toggleDeafen} aria-pressed={voiceDeafened}>{voiceDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}{voiceDeafened ? 'Não está ouvindo' : 'Ouvindo todos'}</button><button type="button" className="leave-voice" onClick={() => leaveVoice(true)}><PhoneOff size={16} />Sair do áudio</button></div><div className="voice-sensitivity"><label className="voice-auto"><input type="checkbox" checked={voiceSensitivity.auto} onChange={(event) => setVoiceAuto(event.target.checked)} />Ajustar a sensibilidade automaticamente</label><label className="voice-auto"><input type="checkbox" checked={voiceSensitivity.suppression} onChange={(event) => setVoiceSuppression(event.target.checked)} />Supressão de ruído{voiceSensitivity.suppression && !voiceSensitivity.suppressionReady ? ' · carregando' : ''}</label><input type="range" min={MIN_THRESHOLD_DB} max={MAX_THRESHOLD_DB} step="1" value={voiceSensitivity.auto ? Math.round(voiceLevels.thresholdDb || MIN_THRESHOLD_DB) : voiceSensitivity.manualDb} disabled={voiceSensitivity.auto} onChange={(event) => setVoiceThreshold(event.target.value)} aria-label="Sensibilidade do microfone" /><span>{voiceSensitivity.auto ? `${Math.round(voiceLevels.thresholdDb || 0)} dB · automático` : `${voiceSensitivity.manualDb} dB`}</span><p className="hint">Abaixo desse nível nada é enviado — é o que segura teclado e batida na mesa enquanto você não está falando. Fale normalmente e veja onde a barra chega. A supressão de ruído limpa o que passa: ótima com ventoinha, ar-condicionado e chiado, parcial com estalo seco de tecla.</p></div></>}</section>
     <label className="size-control">Conexão para a próxima live<select value={watchMode} onChange={(event) => setWatchMode(event.target.value)}><option value="auto">Automático: P2P, depois TURN</option><option value="p2p">Somente P2P</option><option value="turn">Somente TURN</option></select><span>Escolha antes de clicar em Assistir. Não altera lives já abertas.</span></label>
     {nativeAvailable && <label className="size-control">Captura da sua tela<select value={nativeWanted ? 'nativa' : 'navegador'} onChange={(event) => setNativeWanted(event.target.value === 'nativa')} disabled={isBroadcasting}><option value="navegador">Navegador (padrão)</option><option value="nativa">Nativa — experimental</option></select><span>{isBroadcasting ? 'Não muda uma transmissão já iniciada.' : 'A nativa mantém o quadro na placa de vídeo e sustenta 60 FPS em 1440p. O som é o do sistema inteiro, sem o do próprio TelasShare.'}</span></label>}
-    <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><button type="button" className={`people-toggle${showChat ? ' active' : ''}`} onClick={() => setShowChat((current) => !current)} aria-expanded={showChat}><MessageSquare size={16} /><span>{showChat ? 'Fechar conversa' : 'Conversa'}</span>{!showChat && unreadChat > 0 && <b className="chat-badge">{unreadChat > 99 ? '99+' : unreadChat}</b>}</button><button type="button" className={`people-toggle${showSettings ? ' active' : ''}`} onClick={() => setShowSettings((current) => !current)} aria-expanded={showSettings}><SlidersHorizontal size={16} /><span>{showSettings ? 'Fechar qualidade' : 'Configurar transmissão'}</span></button>{layoutRef.current.customised && <button type="button" className="people-toggle layout-reset" onClick={resetLayout} title="Voltar ao tamanho e à ordem originais"><RotateCcw size={15} /><span>Restaurar layout</span></button>}</div>
+    <div className="panel-toggles"><button type="button" className={`people-toggle${showPeople ? ' active' : ''}`} onClick={() => setShowPeople((current) => !current)} aria-expanded={showPeople}><Users size={16} /><span>{showPeople ? 'Fechar amigos' : `Amigos online · ${peers.length + 1}`}</span></button><button type="button" className={`people-toggle${showChat ? ' active' : ''}`} onClick={() => setShowChat((current) => !current)} aria-expanded={showChat}><MessageSquare size={16} /><span>{showChat ? 'Fechar conversa' : 'Conversa'}</span>{!showChat && unreadChat > 0 && <b className="chat-badge">{unreadChat > 99 ? '99+' : unreadChat}</b>}</button><button type="button" className={`people-toggle${showFiles ? ' active' : ''}`} onClick={() => setShowFiles((current) => !current)} aria-expanded={showFiles} disabled={!roomPermanent} title={roomPermanent ? 'Tudo que já foi enviado nesta sala' : 'Somente salas permanentes guardam arquivos'}><FolderOpen size={16} /><span>{showFiles ? 'Fechar arquivos' : 'Arquivos da sala'}</span></button><button type="button" className={`people-toggle${showSettings ? ' active' : ''}`} onClick={() => setShowSettings((current) => !current)} aria-expanded={showSettings}><SlidersHorizontal size={16} /><span>{showSettings ? 'Fechar qualidade' : 'Configurar transmissão'}</span></button>{layoutRef.current.customised && <button type="button" className="people-toggle layout-reset" onClick={resetLayout} title="Voltar ao tamanho e à ordem originais"><RotateCcw size={15} /><span>Restaurar layout</span></button>}</div>
     <div className="workspace panels" onDragEnd={() => { setDragging(null); setDropAt(null) }}>
       {visibleColumns.map((column) => <div className="panel-column" key={column.join('-')} ref={columnRef(column[0])}>{column.map((id) => <Fragment key={id}>{panelById[id]}</Fragment>)}</div>)}
     </div>

@@ -24,10 +24,10 @@ for (const bad of [{ width: NaN }, { width: null }, { width: 'grande' }]) assert
 assert.deepEqual(clampSize('inexistente', { width: 300 }), {})
 
 // --- the arrangement is repaired rather than rejected ---------------------
-assert.deepEqual(normalizeColumns([['people', 'chat'], ['stage']]), [['people', 'chat'], ['stage'], ['settings']])
-assert.deepEqual(normalizeColumns([['people', 'people'], ['people']]), [['people'], ['stage'], ['chat'], ['settings']], 'a panel appears once')
-assert.deepEqual(normalizeColumns([[], ['chat'], []]), [['chat'], ['people'], ['stage'], ['settings']], 'empty columns are dropped')
-assert.deepEqual(normalizeColumns([['inventado', 'chat']]), [['chat'], ['people'], ['stage'], ['settings']])
+assert.deepEqual(normalizeColumns([['people', 'chat'], ['stage']]), [['people', 'chat'], ['stage'], ['files'], ['settings']])
+assert.deepEqual(normalizeColumns([['people', 'people'], ['people']]), [['people'], ['stage'], ['chat'], ['files'], ['settings']], 'a panel appears once')
+assert.deepEqual(normalizeColumns([[], ['chat'], []]), [['chat'], ['people'], ['stage'], ['files'], ['settings']], 'empty columns are dropped')
+assert.deepEqual(normalizeColumns([['inventado', 'chat']]), [['chat'], ['people'], ['stage'], ['files'], ['settings']])
 for (const bad of [null, undefined, 'chat', 42, {}, [1, 2], ['chat']]) {
   assert.deepEqual(normalizeColumns(bad), DEFAULT_COLUMNS, `${JSON.stringify(bad)} falls back to the default`)
 }
@@ -47,21 +47,21 @@ assert.equal(dropRegion({ width: 0, height: 0 }, 0, 0), 'below', 'a panel with n
 // --- stacking, which is the point -----------------------------------------
 // The conversation under the friends list: one column holding both, and the rest untouched.
 const stacked = placePanel(DEFAULT_COLUMNS, 'chat', 'people', 'below')
-assert.deepEqual(stacked, [['people', 'chat'], ['stage'], ['settings']])
-assert.deepEqual(placePanel(DEFAULT_COLUMNS, 'chat', 'people', 'above'), [['chat', 'people'], ['stage'], ['settings']])
+assert.deepEqual(stacked, [['people', 'chat'], ['stage'], ['files'], ['settings']])
+assert.deepEqual(placePanel(DEFAULT_COLUMNS, 'chat', 'people', 'above'), [['chat', 'people'], ['stage'], ['files'], ['settings']])
 // And back out into a column of its own.
-assert.deepEqual(placePanel(stacked, 'chat', 'stage', 'right'), [['people'], ['stage'], ['chat'], ['settings']])
-assert.deepEqual(placePanel(stacked, 'chat', 'people', 'left'), [['chat'], ['people'], ['stage'], ['settings']])
+assert.deepEqual(placePanel(stacked, 'chat', 'stage', 'right'), [['people'], ['stage'], ['chat'], ['files'], ['settings']])
+assert.deepEqual(placePanel(stacked, 'chat', 'people', 'left'), [['chat'], ['people'], ['stage'], ['files'], ['settings']])
 
 // Three in one column, in the order they were dropped.
 const three = placePanel(placePanel(DEFAULT_COLUMNS, 'chat', 'people', 'below'), 'settings', 'chat', 'below')
-assert.deepEqual(three, [['people', 'chat', 'settings'], ['stage']])
+assert.deepEqual(three, [['people', 'chat', 'settings'], ['stage'], ['files']])
 // Moving the middle one out must not leave a hole or a stray empty column.
-assert.deepEqual(placePanel(three, 'chat', 'stage', 'right'), [['people', 'settings'], ['stage'], ['chat']])
+assert.deepEqual(placePanel(three, 'chat', 'stage', 'right'), [['people', 'settings'], ['stage'], ['chat'], ['files']])
 
 // A column emptied by the move disappears rather than lingering as a gap.
 const emptied = placePanel([['people'], ['chat']], 'chat', 'people', 'below')
-assert.deepEqual(emptied, [['people', 'chat'], ['stage'], ['settings']])
+assert.deepEqual(emptied, [['people', 'chat'], ['stage'], ['files'], ['settings']])
 
 // Nonsense leaves the arrangement exactly as it was.
 assert.deepEqual(placePanel(DEFAULT_COLUMNS, 'chat', 'chat', 'below'), DEFAULT_COLUMNS)
@@ -76,7 +76,7 @@ assert.deepEqual(layout.columns, DEFAULT_COLUMNS)
 assert.equal(layout.customised, false)
 
 assert.equal(layout.place('chat', 'people', 'below'), true)
-assert.deepEqual(layout.columns, [['people', 'chat'], ['stage'], ['settings']])
+assert.deepEqual(layout.columns, [['people', 'chat'], ['stage'], ['files'], ['settings']])
 assert.equal(layout.customised, true)
 assert.equal(layout.place('chat', 'chat', 'below'), false, 'a move that changes nothing is not a change')
 
@@ -100,13 +100,13 @@ assert.equal(changes, before)
 
 // It survives the session, clamped again on the way back in.
 const reopened = createPanelLayout({ storage })
-assert.deepEqual(reopened.columns, [['people', 'chat'], ['stage'], ['settings']])
+assert.deepEqual(reopened.columns, [['people', 'chat'], ['stage'], ['files'], ['settings']])
 assert.deepEqual(reopened.sizeOf('chat'), { height: 320, width: 400 })
 
 // --- an arrangement from the version that had only one row ----------------
 // It stored an order; each panel simply becomes its own column, which is what that row was.
 const older = createPanelLayout({ storage: fakeStorage({ [KEY]: '{"order":["chat","stage","people","settings"],"sizes":{"chat":{"width":380}}}' }) })
-assert.deepEqual(older.columns, [['chat'], ['stage'], ['people'], ['settings']])
+assert.deepEqual(older.columns, [['chat'], ['stage'], ['people'], ['settings'], ['files']], 'and a panel that version never had joins the end')
 assert.deepEqual(older.sizeOf('chat'), { width: 380 }, 'and the sizes carry over')
 
 // --- one way back ---------------------------------------------------------
@@ -128,7 +128,7 @@ assert.equal(huge.sizeOf('chat').width, PANEL_LIMITS.chat.maxWidth)
 // A browser that refuses storage must not take the room down with it.
 const noStorage = createPanelLayout({ storage: null })
 assert.doesNotThrow(() => { noStorage.resize('chat', { width: 300 }); noStorage.place('chat', 'people', 'below') })
-assert.deepEqual(noStorage.columns, [['people', 'chat'], ['stage'], ['settings']], 'it still works for this session')
+assert.deepEqual(noStorage.columns, [['people', 'chat'], ['stage'], ['files'], ['settings']], 'it still works for this session')
 
 // --- the rule has to actually reach an element ---------------------------
 // A resize rule written for a class the JSX never emits is a rule that does nothing, and nothing about

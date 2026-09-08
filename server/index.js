@@ -118,6 +118,11 @@ const isCoOwner = (room, session) => {
   const wanted = nameKey(session?.name)
   return wanted ? [...room.coOwners.values()].some((name) => name === wanted) : false
 }
+// Deleting somebody else's file is a moderator's act, so it is the pair who already run the room. Not
+// the sender: a file in a shared room is the room's, and letting the sender remove it later would give
+// away a quiet form of control over what everyone else can still see.
+const runsTheRoom = (room, session) => isOwner(room, session) || isCoOwner(room, session)
+
 // Whoever asked for the room to go, by either measure, so they can take it back from anywhere.
 const askedToDelete = (room, session) => room.deleteBy === session?.sub
   || (room.deleteByName ? nameKey(room.deleteByName) === nameKey(session?.name) : false)
@@ -403,6 +408,48 @@ app.post('/api/room/files', async (req, res) => {
   await store.addMessage(key, message, CHAT_HISTORY)
   sendToRoom(room.id, { type: 'chat', message: withLinks(message) })
   res.status(201).json({ file: { ...message.file, url: fileUrl(file.id) } })
+})
+
+// Everything the room holds, oldest first, straight from the file index rather than from the
+// conversation. The conversation keeps only its last hundred lines, so a file sent months ago has long
+// stopped being mentioned there -- and it is still on the disk, still counted against the room's share.
+// Without this it was unreachable: present, paid for, and invisible.
+app.get('/api/room/files', async (req, res) => {
+  const seat = readBearerSession(req, 'room')
+  if (!seat) return res.status(401).json({ error: 'Entre na sala novamente.' })
+  const room = rooms.get(seat.roomKey)
+  if (!room) return res.status(404).json({ error: 'Sala não encontrada.' })
+  const stored = await store.listFiles(seat.roomKey)
+  res.json({
+    files: stored.map((file) => ({
+      id: file.id, name: file.name, kind: file.kind, inline: file.inline, bytes: file.bytes,
+      at: file.at, fromName: file.fromName ?? null, url: fileUrl(file.id),
+    })),
+    canDelete: runsTheRoom(room, seat),
+  })
+})
+
+// The bytes go, not just the row. A file removed from a list while it still sits on the disk is the
+// worst of both: gone for the people who wanted it and still spending the room's share.
+app.post('/api/room/files/:id/delete', async (req, res) => {
+  const seat = readBearerSession(req, 'room')
+  if (!seat) return res.status(401).json({ error: 'Entre na sala novamente.' })
+  const room = rooms.get(seat.roomKey)
+  if (!room) return res.status(404).json({ error: 'Sala não encontrada.' })
+  if (!runsTheRoom(room, seat)) return res.status(403).json({ error: 'Apenas o dono e os co-donos podem apagar arquivos.' })
+  const file = await store.findFile(req.params.id)
+  // Belonging to this room is checked rather than assumed: the address carries an id, and an id from
+  // another room must not be deletable by the people who run this one.
+  if (!file || file.roomKey !== seat.roomKey) return res.status(404).json({ error: 'Arquivo não encontrado.' })
+
+  await fileStorage.remove(file.roomId, file.id)
+  await store.deleteFile(file.id)
+  await store.removeMessageWithFile(seat.roomKey, file.id)
+  const index = room.messages.findIndex((entry) => entry.file?.id === file.id)
+  if (index !== -1) room.messages.splice(index, 1)
+  // Everyone sees it go at once, from the conversation and from the list alike.
+  sendToRoom(room.id, { type: 'file-removed', id: file.id })
+  res.json({ deleted: true })
 })
 
 // Downloading. The token in the address is the whole permission, so it is checked before anything else

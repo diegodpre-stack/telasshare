@@ -118,6 +118,9 @@ export function createFileStorage({ root = process.env.FILES_DIR || 'data/files'
       return { ok: true, id, bytes, sha256: hash.digest('hex'), ...sniff(head) }
     },
 
+    // One file rather than a whole room. `force` because the row and the bytes are two separate things
+    // and either can already be gone: failing because the file was not there would leave a row nobody
+    // can act on, which is the worse of the two states.
     async remove(roomId, fileId) {
       await rm(pathFor(roomId, fileId), { force: true })
     },

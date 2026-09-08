@@ -7,7 +7,7 @@
 // Every stored value is clamped on the way back in rather than trusted. A panel restored at four pixels
 // wide, or at a width from a much larger monitor, is worse than one restored at its default: it looks
 // like the app is broken and there is nothing on screen to explain it.
-export const PANELS = ['people', 'stage', 'chat', 'settings']
+export const PANELS = ['people', 'stage', 'chat', 'files', 'settings']
 
 // A column is as wide as the panel at the top of it, and each panel keeps its own height. So the width
 // stored against a panel only means anything while that panel leads a column, which is also the only
@@ -16,11 +16,12 @@ export const PANEL_LIMITS = {
   people: { minWidth: 200, maxWidth: 900, minHeight: 160, maxHeight: 1600 },
   stage: { minWidth: 320, maxWidth: 2400, minHeight: 200, maxHeight: 2000 },
   chat: { minWidth: 220, maxWidth: 900, minHeight: 160, maxHeight: 1600 },
+  files: { minWidth: 240, maxWidth: 900, minHeight: 160, maxHeight: 1600 },
   settings: { minWidth: 220, maxWidth: 900, minHeight: 160, maxHeight: 1800 },
 }
 
 const STORAGE_KEY = 'telasshare-layout'
-export const DEFAULT_COLUMNS = [['people'], ['stage'], ['chat'], ['settings']]
+export const DEFAULT_COLUMNS = [['people'], ['stage'], ['chat', 'files'], ['settings']]
 
 const clamp = (value, low, high) => {
   const number = typeof value === 'string' ? Number(value) : value
@@ -51,10 +52,14 @@ export function normalizeColumns(value) {
     }
     if (kept.length) columns.push(kept)
   }
+  // Nothing usable in there at all -- junk, or a store that has never been written -- means the default,
+  // not one column per panel. The two used to be the same arrangement, so this was never exercised; the
+  // moment the default stacked two panels together they parted company.
+  if (!columns.length) return DEFAULT_COLUMNS.map((column) => [...column])
   // Whatever the stored arrangement never mentioned gets a column of its own at the end, which is where
   // a panel this version added would want to be anyway.
   for (const id of PANELS) if (!seen.has(id)) columns.push([id])
-  return columns.length ? columns : DEFAULT_COLUMNS.map((column) => [...column])
+  return columns
 }
 
 // Which half or edge of a panel the pointer is over, and so what dropping there should mean. The sides

@@ -61,17 +61,27 @@ Libere as portas TCP `5173` e `8787` no firewall do PC servidor. Nos dois PCs, a
 
 ## Pela internet
 
-O deploy automático do Render está ativado em `render.yaml` e no painel (Auto-Deploy: On Commit). Cada push para `main` publica a nova versão automaticamente. O deploy reinicia o servidor e pode interromper salas e transmissões em uso.
+O servidor roda em uma máquina da Oracle Cloud, em `https://telasshare.duckdns.org`, com o Caddy à frente cuidando do certificado. O Node escuta apenas em `127.0.0.1`, de modo que nada chega nele sem passar pelo Caddy.
 
-### Opção simples: Render
+### Como está montado
 
-O arquivo `render.yaml` deixa o projeto pronto para o Render. Coloque esta pasta em um repositório GitHub e, no painel do Render, escolha **New > Blueprint**, conecte o repositório e confirme a criação do serviço. O Render executará a instalação, o build e `npm start`, fornecendo um endereço `https://...onrender.com`. O frontend usa automaticamente `wss://` no mesmo endereço.
+- **Máquina**: Oracle Cloud Always Free, Ubuntu 24.04, 150 GB de disco. O serviço é `telasshare.service`, com `systemd` reiniciando em caso de queda.
+- **Banco**: MongoDB Atlas, camada gratuita, na mesma região da máquina. Guarda as salas permanentes e suas conversas; uma sala temporária nunca o toca. Sem `MONGODB_URI` o site continua funcionando, apenas sem salas permanentes.
+- **Arquivos**: no disco da máquina, em `FILES_DIR`, uma pasta por sala. Vão embora junto com a sala.
+- **Relay**: Cloudflare Realtime, com um teto mensal em `TURN_MONTHLY_LIMIT_GB`. Ao chegar nele o servidor deixa de oferecer relay e o P2P continua.
+- **Site**: `npm run build` é feito fora da máquina e o `dist/` é enviado pronto, porque 1 GB de memória não comporta o Vite.
 
-No plano gratuito, o serviço pode dormir após 15 minutos sem tráfego e levar cerca de um minuto para acordar. Ele é adequado para testes e uso ocasional, não para uma versão de produção.
+Um build pode ser apontado para outro servidor sem publicar nada, o que serve para testar uma máquina nova com o aplicativo de verdade:
+
+```bash
+npm run desktop:test -- https://outro-servidor.exemplo
+```
+
+O `render.yaml` continua no repositório: o projeto sobe no Render sem alteração nenhuma, o que é uma saída caso a máquina precise ser trocada às pressas. O plano gratuito de lá dorme após alguns minutos sem tráfego e leva cerca de um minuto para acordar.
 
 ### Aplicativo para Windows
 
-O site oferece em todas as telas uma versão portátil (`TelasShare-Portable.exe`), que abre sem instalação, e um instalador Windows 64-bit opcional. O aplicativo Electron abre o mesmo serviço hospedado no Render, portanto usuários do navegador e do aplicativo entram nas mesmas salas e assistem às mesmas transmissões. Ele inclui seu próprio mecanismo Chromium e não depende de Edge, Chrome ou WebView2 instalados.
+O site oferece em todas as telas uma versão portátil (`TelasShare-Portable.exe`), que abre sem instalação, e um instalador Windows 64-bit opcional. O aplicativo Electron abre o mesmo serviço hospedado na Oracle, portanto usuários do navegador e do aplicativo entram nas mesmas salas e assistem às mesmas transmissões. Ele inclui seu próprio mecanismo Chromium e não depende de Edge, Chrome ou WebView2 instalados.
 
 Ao iniciar uma captura no aplicativo, o seletor mostra as telas e janelas disponíveis. Nada pode iniciar a captura silenciosamente. Tela inteira pode incluir todo o áudio do sistema. No Windows 10 build 20348 ou posterior, uma janela usa um capturador WASAPI nativo por processo: ele inclui a árvore de processos do aplicativo escolhido e exclui Discord e outros programas. Se esse recurso não estiver disponível, a janela é transmitida sem áudio em vez de usar silenciosamente o áudio completo do computador. Na versão web, selecione uma guia no Chrome/Edge para compartilhar apenas o áudio dela.
 

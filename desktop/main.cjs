@@ -12,7 +12,14 @@ if (localAppUrl) {
     throw new Error('ENTRETELAS_APP_URL must be a loopback HTTP(S) URL')
   }
 }
-const APP_URL = localAppUrl || 'https://telasshare.onrender.com'
+// A build can be aimed at a server other than the published one -- a test build against a machine that
+// is not yet the live one, say. Baked in when the app is built rather than read from the environment
+// when it runs: this window carries a preload and the app's own privileges, so an address somebody
+// could set at launch is an address somebody could point it anywhere.
+const buildServer = (() => {
+  try { return require('../package.json').telasshareServer || null } catch { return null }
+})()
+const APP_URL = localAppUrl || buildServer || 'https://telasshare.duckdns.org'
 
 // Apply one list per switch: appendSwitch replaces a previous value for the same switch.
 const { mediaFeaturePolicy, createMediaRuntimeLog } = require('./mediaRuntime.cjs')
@@ -324,6 +331,11 @@ function createWindow() {
   // it. Everything else is still refused. openExternal hands the address to whatever the system has
   // registered for that scheme, so file:, and anything a program installed on this machine claimed, must
   // never reach it -- a message from another person is not allowed to start a program.
+  if (buildServer) {
+    const label = `TelasShare TESTE — ${new URL(buildServer).host}`
+    mainWindow.setTitle(label)
+    mainWindow.on('page-title-updated', (event) => { event.preventDefault(); mainWindow.setTitle(label) })
+  }
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     openIfWeb(url)
     return { action: 'deny' }

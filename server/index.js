@@ -488,6 +488,38 @@ const turnConfiguration = () => ({
   analyticsToken: process.env.CLOUDFLARE_ANALYTICS_API_TOKEN,
   limitBytes: Math.max(1, Number(process.env.TURN_MONTHLY_LIMIT_GB || TURN_DEFAULT_LIMIT_GB)) * 1_000_000_000,
 })
+// The relay of our own, used only once Cloudflare's is unavailable -- its monthly allowance spent, its
+// keys missing, or its API refusing to answer. Cloudflare stays first because it offers TURN over 443,
+// which is what gets somebody out of a corporate network that allows nothing else; this machine cannot,
+// since 443 is the site itself.
+//
+// Credentials are minted here rather than stored anywhere: coturn is run with `use-auth-secret`, so a
+// username of "<expiry>:<name>" signed with the shared secret is a password it will accept until that
+// moment passes. Nothing to keep, nothing to revoke, and a stolen one is worth minutes.
+const coturnConfiguration = () => ({
+  host: (process.env.COTURN_HOST || '').trim(),
+  secret: process.env.COTURN_SECRET || '',
+  ttl: Math.max(60, Number(process.env.COTURN_TTL_SECONDS) || TURN_CREDENTIAL_TTL_SECONDS),
+})
+const coturnServers = (session) => {
+  const { host, secret, ttl } = coturnConfiguration()
+  if (!host || !secret) return null
+  // Named for whoever asked, because coturn counts its quotas per username: one name shared by everyone
+  // would mean the dozen allocations a person is allowed are a dozen for the whole room. Hashed rather
+  // than the session itself -- it identifies without carrying anything.
+  const who = session?.sub ? crypto.createHash('sha256').update(session.sub).digest('base64url').slice(0, 12) : 'telasshare'
+  const username = `${Math.floor(Date.now() / 1000) + ttl}:${who}`
+  const credential = crypto.createHmac('sha1', secret).update(username).digest('base64')
+  // UDP first and TCP after, in that order, because the client walks the list in stages: direct, then
+  // UDP relay, then everything. Relaying over TCP costs latency and only exists for networks that block
+  // UDP outright, so it must never be tried while UDP is still an option.
+  return {
+    urls: [`turn:${host}?transport=udp`, `turn:${host}?transport=tcp`],
+    username,
+    credential,
+  }
+}
+
 const readTurnUsage = async ({ keyId, accountId, analyticsToken, limitBytes }) => {
   if (!keyId || !accountId || !analyticsToken) return { enabled: false, blocked: true, reason: 'protection-not-configured', usedBytes: 0, limitBytes }
   if (turnUsageCache && Date.now() - turnUsageCache.checkedAt < TURN_USAGE_CACHE_MS) return turnUsageCache
@@ -526,24 +558,44 @@ const authenticateRoomRequest = (req, res) => {
 }
 
 app.get('/api/turn-status', async (req, res) => {
-  if (!authenticateRoomRequest(req, res)) return
+  const seat = authenticateRoomRequest(req, res)
+  if (!seat) return
   res.set('Cache-Control', 'no-store')
   const configuration = turnConfiguration()
-  if (!configuration.enabled) return res.json({ turnEnabled: false, blocked: true, reason: 'turn-disabled' })
+  // TURN_ENABLED is the hard switch: off means no relay at all, ours included.
+  if (!configuration.enabled) return res.json({ turnEnabled: false, blocked: true, reason: 'turn-disabled', relay: null })
   const status = await readTurnUsage(configuration)
-  res.json({ turnEnabled: status.enabled && !status.blocked, blocked: status.blocked, reason: status.reason, usedBytes: status.usedBytes, limitBytes: status.limitBytes })
+  const cloudflareUsable = status.enabled && !status.blocked
+  const ours = cloudflareUsable ? null : coturnServers(seat)
+  res.json({
+    turnEnabled: cloudflareUsable || !!ours,
+    blocked: status.blocked && !ours,
+    reason: status.reason,
+    relay: cloudflareUsable ? 'cloudflare' : ours ? 'coturn' : null,
+    usedBytes: status.usedBytes,
+    limitBytes: status.limitBytes,
+  })
 })
 
 app.get('/api/ice-servers', async (req, res) => {
-  if (!authenticateRoomRequest(req, res)) return
+  const seat = authenticateRoomRequest(req, res)
+  if (!seat) return
 
   res.set('Cache-Control', 'no-store')
   const fallback = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302', 'stun:stun.nextcloud.com:443'] }]
   const configuration = turnConfiguration()
+  // Every way Cloudflare can be unusable ends up here, and each of them is a reason to reach for our own
+  // relay rather than to leave somebody on STUN alone -- which for anybody behind a symmetric NAT means
+  // no picture at all. The one exception is the hard switch, which means no relay of any kind.
+  const withOurs = (reason, blocked = false) => {
+    const ours = coturnServers(seat)
+    if (!ours) return res.json({ iceServers: fallback, turnEnabled: false, blocked, reason })
+    return res.json({ iceServers: [...fallback, ours], turnEnabled: true, relay: 'coturn', reason })
+  }
   if (!configuration.enabled) return res.json({ iceServers: fallback, turnEnabled: false, reason: 'turn-disabled' })
-  if (!configuration.keyId || !configuration.credentialToken) return res.json({ iceServers: fallback, turnEnabled: false, reason: 'turn-not-configured' })
+  if (!configuration.keyId || !configuration.credentialToken) return withOurs('turn-not-configured')
   const usage = await readTurnUsage(configuration)
-  if (!usage.enabled || usage.blocked) return res.json({ iceServers: fallback, turnEnabled: false, blocked: usage.blocked, reason: usage.reason })
+  if (!usage.enabled || usage.blocked) return withOurs(usage.reason, usage.blocked)
 
   try {
     const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(configuration.keyId)}/credentials/generate-ice-servers`, {
@@ -559,10 +611,10 @@ app.get('/api/ice-servers', async (req, res) => {
     // Keep Google's STUN candidate as well: some networks allow port 19302 but block Cloudflare STUN on 3478/53.
     // TURN remains available, but a working direct candidate keeps its normal ICE priority.
     const iceServers = [...fallback, ...cloudflareServers]
-    return res.json({ iceServers, turnEnabled: iceServers.some((entry) => JSON.stringify(entry.urls).includes('turn:') || JSON.stringify(entry.urls).includes('turns:')) })
+    return res.json({ iceServers, relay: 'cloudflare', turnEnabled: iceServers.some((entry) => JSON.stringify(entry.urls).includes('turn:') || JSON.stringify(entry.urls).includes('turns:')) })
   } catch (error) {
     console.error('Could not generate temporary TURN credentials:', error.message)
-    return res.json({ iceServers: fallback, turnEnabled: false })
+    return withOurs('cloudflare-unreachable')
   }
 })
 

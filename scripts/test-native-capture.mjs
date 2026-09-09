@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, VIDEO_ENCODERS } =
+const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, VIDEO_ENCODERS } =
   createRequire(import.meta.url)('../desktop/nativeCapture.cjs')
 
 // --- finding the install -------------------------------------------------
@@ -217,4 +217,30 @@ assert.ok(spawned.options.env.PATH.startsWith('D:\\gst\\bin;'), 'the install dir
 assert.ok(spawned.options.env.PATH.includes('C:\\windows'), 'and the rest of PATH must survive')
 assert.equal(spawned.options.windowsHide, true, 'no console window may flash over a live broadcast')
 
-console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, the encoder this machine actually has, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback.')
+// --- even numbers, or nothing downstream works ----------------------------
+// A window is whatever size somebody left it; the one this was found on was 1282x721. NV12 subsamples
+// chroma two by two, so an odd height cannot be represented, the conversion fails, and the error comes
+// out at the far end of the pipeline as "Internal data stream error" -- which is why window capture
+// looked broken while full-screen capture, always even, was fine.
+const shaped = buildPipelineArgs({ endpoint: 'http://127.0.0.1:1/whip/x', windowHandle: 66880 })
+const evenCaps = shaped.find((entry) => typeof entry === 'string' && entry.includes('width=(int)[2,'))
+assert.ok(evenCaps, 'the pipeline asks for a size the encoder can actually take')
+assert.match(evenCaps, /height=\(int\)\[2,\d+,2\]/, 'and rounds rather than pinning a resolution, so a resize renegotiates')
+assert.ok(shaped.indexOf(evenCaps) > shaped.indexOf('d3d11convert'), 'after the convert, which is what does the rounding')
+assert.ok(shaped.indexOf(evenCaps) < shaped.indexOf('amfh264enc'), 'and before the encoder that would refuse the odd one')
+
+// --- an encoder that exists is not an encoder that works -------------------
+// gst-inspect answered yes for nvh264enc on a machine whose NVENC could not be queried, so the pipeline
+// was built around it and then refused to link -- "could not link d3d11convert0 to nvh264enc0" -- with
+// no attempt at the next one down. Asking whether it links is the only question worth asking.
+const linkProbes = []
+const record = (status) => (command, args) => { linkProbes.push({ command, args }); return { status } }
+assert.equal(encoderWorks('D:/gst/bin', 'nvh264enc', record(1)), false, 'a probe that fails rejects the encoder')
+assert.equal(encoderWorks('D:/gst/bin', 'mfh264enc', record(0)), true, 'and one that runs accepts it')
+assert.equal(encoderWorks('D:/gst/bin', 'x', () => { throw new Error('no binary') }), false, 'a missing binary is a no, not a crash')
+assert.ok(linkProbes[0].command.includes('gst-launch-1.0'), 'the probe builds a pipeline rather than reading a description')
+assert.ok(linkProbes[0].args.includes('nvh264enc'), 'with the encoder under test in it')
+assert.ok(linkProbes[0].args.includes('d3d11convert'), 'through the same conversion the broadcast uses')
+assert.ok(linkProbes[0].args.some((entry) => entry.includes('width=(int)[2,')), 'and the same size constraint')
+
+console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, the encoder this machine actually has, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback; an odd window size is rounded to something NV12 can hold, and an encoder is chosen by whether it links rather than by whether it is registered.')

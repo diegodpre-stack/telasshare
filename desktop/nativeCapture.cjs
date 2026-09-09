@@ -110,15 +110,29 @@ const VIDEO_ENCODERS = [
 ]
 
 let chosenEncoder = null
-function pickVideoEncoder(bin, has = (element) => elementExists(bin, element)) {
+function pickVideoEncoder(bin, has = (element) => encoderWorks(bin, element)) {
   if (chosenEncoder !== null) return chosenEncoder
   chosenEncoder = VIDEO_ENCODERS.find(({ element }) => has(element)) || null
   return chosenEncoder
 }
 
-function elementExists(bin, element, run = spawnSync) {
+// Registered is not the same as usable, and the difference is what left somebody unable to broadcast at
+// all: gst-inspect answered yes for nvh264enc on a machine whose NVENC could not be queried, so the
+// pipeline was built around an encoder that then refused to link -- "could not link d3d11convert0 to
+// nvh264enc0" -- with no attempt at the next one down the list.
+//
+// So the question asked is the one that matters: build the shape this app actually uses, one frame of
+// it, and see whether it runs. An encoder that cannot be linked here cannot be linked in a broadcast.
+function encoderWorks(bin, element, run = spawnSync) {
   try {
-    const probe = run(path.join(bin, 'gst-inspect-1.0.exe'), [element], { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
+    const probe = run(path.join(bin, 'gst-launch-1.0.exe'), [
+      'videotestsrc', 'num-buffers=1',
+      '!', 'd3d11upload',
+      '!', 'd3d11convert',
+      '!', 'video/x-raw(memory:D3D11Memory),format=NV12,width=(int)[2,8192,2],height=(int)[2,8192,2]',
+      '!', element,
+      '!', 'fakesink',
+    ], { encoding: 'utf8', windowsHide: true, timeout: 20_000, env: pipelineEnv(process.env, bin) })
     return probe.status === 0
   } catch { return false }
 }
@@ -169,6 +183,13 @@ function buildPipelineArgs({
     // BGRA to NV12 on the GPU. Letting the encoder pull system memory here is the whole bug we are
     // avoiding, so this element must stay between the source and the encoder.
     '!', 'd3d11convert',
+    // Even numbers, or nothing downstream works. A window is whatever size the person left it -- the one
+    // this was found on reported 1282x721 -- and NV12 subsamples chroma two by two, so an odd height
+    // cannot be represented at all. The convert failed, the error surfaced at the source as "Internal
+    // data stream error", and window capture looked broken while full-screen capture was fine, because a
+    // monitor is always even. The step of 2 in the range lets the scaler round to the nearest even size
+    // rather than pinning a resolution, so a window resized mid-broadcast simply renegotiates.
+    '!', 'video/x-raw(memory:D3D11Memory),format=NV12,width=(int)[2,8192,2],height=(int)[2,8192,2]',
     // cabac and b-frames off: constrained baseline forbids both, and B-frames add latency a live
     // broadcast cannot spend. Bitrate is fixed -- whipsink has no congestion control, and webrtcsink's
     // could not drive amfh264enc either ("Bitrate handling is not supported yet for amfh264enc").
@@ -206,4 +227,4 @@ function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exist
   return child
 }
 
-module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, VIDEO_ENCODERS }
+module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, VIDEO_ENCODERS }

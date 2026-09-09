@@ -25,6 +25,7 @@ import { createVoiceInput, MAX_THRESHOLD_DB, MIN_THRESHOLD_DB } from './voiceInp
 import { splitLinks } from './chatLinks.js'
 import { createPanelLayout, dropRegion } from './panelLayout.js'
 import { createRoomSeats } from './roomSeats.js'
+import { clipboardFiles } from './clipboardFiles.js'
 import { Ban, Cast, CircleStop, DoorOpen, Download, Expand, ExternalLink, Eye, FolderOpen, HeadphoneOff, Headphones, KeyRound, LogOut, MessageSquare, Mic, MicOff, Minimize, MonitorUp, PhoneCall, PhoneOff, Paperclip, Plus, Radio, RotateCcw, Send, ShieldCheck, Star, Timer, Trash2, SlidersHorizontal, UserX, Users, Volume2, VolumeX, Wifi, WifiOff, X } from 'lucide-react'
 
 const roomSeats = createRoomSeats()
@@ -367,7 +368,22 @@ function ChatPanel({ messages, selfId, selfName, manages, draft, onDraft, onSend
     </div>
     <form className="chat-compose" onSubmit={submit}>
       {canUpload && <label className="chat-attach" title={uploading ? 'Enviando…' : 'Enviar um arquivo'}><Paperclip size={16} /><input type="file" hidden disabled={uploading} onChange={(event) => { const chosen = event.target.files?.[0]; event.target.value = ''; if (chosen) onUpload(chosen) }} /></label>}
-      <input value={draft} onChange={(event) => onDraft(event.target.value.slice(0, CHAT_MAX_LENGTH))} maxLength={CHAT_MAX_LENGTH} placeholder="Escreva uma mensagem" aria-label="Mensagem para a sala" />
+      <input
+        value={draft}
+        onChange={(event) => onDraft(event.target.value.slice(0, CHAT_MAX_LENGTH))}
+        maxLength={CHAT_MAX_LENGTH}
+        placeholder={canUpload ? 'Escreva ou cole uma imagem' : 'Escreva uma mensagem'}
+        aria-label="Mensagem para a sala"
+        onPaste={(event) => {
+          // Texto colado segue o caminho normal; so um arquivo interrompe a colagem, porque deixar os
+          // dois acontecerem escreveria o nome do arquivo na caixa junto com o envio.
+          if (!canUpload || uploading) return
+          const pasted = clipboardFiles(event.clipboardData)
+          if (!pasted.length) return
+          event.preventDefault()
+          for (const file of pasted) onUpload(file)
+        }}
+      />
       <span className={`chat-count${draft.length >= CHAT_MAX_LENGTH ? ' full' : ''}`}>{draft.length}/{CHAT_MAX_LENGTH}</span>
       <button type="submit" disabled={!draft.trim()} title="Enviar"><Send size={16} /></button>
     </form>

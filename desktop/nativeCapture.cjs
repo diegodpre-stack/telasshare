@@ -72,6 +72,46 @@ const positiveInt = (value, fallback) => Number.isInteger(value) && value > 0 ? 
 // A window is captured by its HWND, which needs the Windows Graphics Capture backend; a monitor is
 // captured by index, where -1 means the primary one. Passing a handle wins, since someone who picked a
 // window meant that window and not whatever screen it happens to sit on.
+// What a given monitor index actually captures. Asked of the pipeline rather than of Windows, because
+// the number that matters is the one this element uses and no other list is guaranteed to agree with it.
+function monitorSize(bin, index, run = spawnSync) {
+  try {
+    const probe = run(path.join(bin, 'gst-launch-1.0.exe'), [
+      '-v', 'd3d11screencapturesrc', `monitor-index=${index}`, 'num-buffers=1', '!', 'fakesink',
+    ], { encoding: 'utf8', windowsHide: true, timeout: 15_000, env: pipelineEnv(process.env, bin) })
+    if (probe.status !== 0) return null
+    const found = /width=\(int\)(\d+), height=\(int\)(\d+)/.exec(String(probe.stdout ?? ''))
+    return found ? { width: Number(found[1]), height: Number(found[2]) } : null
+  } catch { return null }
+}
+
+// The index the app worked out, checked before it is used, and corrected if the two orders disagree.
+//
+// This is the second time the wrong monitor has been captured: first by matching identifiers that were
+// never indices, and then by an index that is right on this machine and was five on somebody else's. So
+// the answer is verified against something that cannot be misread -- the size of the picture that index
+// produces -- rather than trusted because a list happened to line up.
+const settledMonitors = new Map()
+const MONITOR_SEARCH_LIMIT = 8
+function resolveMonitorIndex(bin, { monitorIndex = 0, width, height } = {}, sizeOf = monitorSize) {
+  // No expected size means nothing to check against, so the caller's answer stands.
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return monitorIndex
+  const key = `${monitorIndex}:${width}x${height}`
+  if (settledMonitors.has(key)) return settledMonitors.get(key)
+  // A couple of pixels of tolerance: a scaled display rounds, and being off by one must not send the
+  // broadcast to a different screen.
+  const fits = (size) => !!size && Math.abs(size.width - width) <= 2 && Math.abs(size.height - height) <= 2
+  let answer = monitorIndex
+  if (!fits(sizeOf(bin, monitorIndex))) {
+    for (let index = 0; index < MONITOR_SEARCH_LIMIT; index += 1) {
+      if (index === monitorIndex) continue
+      if (fits(sizeOf(bin, index))) { answer = index; break }
+    }
+  }
+  settledMonitors.set(key, answer)
+  return answer
+}
+
 const sourceArgs = ({ windowHandle, monitorIndex }) => {
   if (Number.isInteger(windowHandle) && windowHandle > 0) return ['capture-api=wgc', `window-handle=${windowHandle}`]
   return [`monitor-index=${Number.isInteger(monitorIndex) && monitorIndex >= 0 ? monitorIndex : 0}`]
@@ -244,6 +284,8 @@ function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exist
   if (!encoder) return null
   const args = buildPipelineArgs({
     ...options,
+    // Only for a monitor: a window is named by its handle and no index is involved.
+    ...(Number.isInteger(options.windowHandle) && options.windowHandle > 0 ? {} : { monitorIndex: resolveMonitorIndex(bin, options) }),
     encoder,
     allowProcessLoopback: options.audio ? supportsProcessLoopback(bin) : false,
   })
@@ -256,4 +298,4 @@ function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exist
   return child
 }
 
-module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, windowProcessId, VIDEO_ENCODERS }
+module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, windowProcessId, resolveMonitorIndex, VIDEO_ENCODERS }

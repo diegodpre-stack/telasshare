@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, windowProcessId, VIDEO_ENCODERS } =
+const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, windowProcessId, resolveMonitorIndex, VIDEO_ENCODERS } =
   createRequire(import.meta.url)('../desktop/nativeCapture.cjs')
 
 // --- finding the install -------------------------------------------------
@@ -287,4 +287,37 @@ for (const bad of [0, -1, null, 'x', 1.5]) {
   assert.equal(calls, 0, `and ${String(bad)} is refused without asking the system anything`)
 }
 
-console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, the encoder this machine actually has, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback; an odd window size is rounded to something NV12 can hold, and an encoder is chosen by whether it links rather than by whether it is registered; sharing one window with sound carries that application alone, a whole screen still carries everything but this app, and a window that cannot name its process falls back rather than falling silent.')
+// --- the monitor index has to be an index -----------------------------------
+// "screen:<n>:" is not a capture index. It reads like one on a machine whose displays happen to be
+// numbered 0, 1, 2, and on a laptop with an external screen it came back as 5 -- a Windows display
+// identifier -- and the capture refused outright. So the index is checked against the size of the
+// picture it produces, which cannot be misread, before it is used.
+const telas = { 0: { width: 2560, height: 1440 }, 1: { width: 1920, height: 1080 }, 2: { width: 1920, height: 1080 } }
+const olhar = (perguntas) => (bin, index) => { perguntas.push(index); return telas[index] || null }
+
+let perguntas = []
+assert.equal(resolveMonitorIndex('D:/gst', { monitorIndex: 5, width: 1920, height: 1080 }, olhar(perguntas)), 1,
+  'an index that captures nothing is replaced by one that captures the right screen')
+assert.equal(perguntas[0], 5, 'the answer it was given is tried first, not last')
+
+perguntas = []
+assert.equal(resolveMonitorIndex('D:/gst', { monitorIndex: 0, width: 2560, height: 1440 }, olhar(perguntas)), 0)
+assert.deepEqual(perguntas, [0], 'an index that already fits is not second-guessed, and costs one probe')
+
+// Cached: the hardware does not change while the app runs, and probing spawns a pipeline each time.
+perguntas = []
+assert.equal(resolveMonitorIndex('D:/gst', { monitorIndex: 0, width: 2560, height: 1440 }, olhar(perguntas)), 0)
+assert.deepEqual(perguntas, [], 'asked once and remembered')
+
+// A scaled display rounds, so a pixel or two must not send the broadcast to another screen.
+assert.equal(resolveMonitorIndex('D:/gst', { monitorIndex: 9, width: 2561, height: 1441 }, olhar([])), 0)
+// Nothing matching leaves the caller's answer alone rather than picking something at random.
+assert.equal(resolveMonitorIndex('D:/gst', { monitorIndex: 3, width: 800, height: 600 }, olhar([])), 3)
+// Without a size there is nothing to check against, and nothing is probed.
+for (const missing of [{}, { width: 1920 }, { height: 1080 }, { width: 0, height: 0 }, { width: '1920', height: 1080 }]) {
+  const nada = []
+  assert.equal(resolveMonitorIndex('D:/gst', { monitorIndex: 7, ...missing }, olhar(nada)), 7)
+  assert.deepEqual(nada, [], 'and no pipeline is launched to find that out')
+}
+
+console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, the encoder this machine actually has, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback; an odd window size is rounded to something NV12 can hold, and an encoder is chosen by whether it links rather than by whether it is registered; sharing one window with sound carries that application alone, a whole screen still carries everything but this app, and a window that cannot name its process falls back rather than falling silent; a monitor index is checked against the size it captures and corrected when it turns out not to be an index at all.')

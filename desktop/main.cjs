@@ -203,16 +203,22 @@ function describeSource(source, audio) {
   // A window's size is not known until it is captured, so only screens can say how many pixels the
   // encoder will be given -- which is what the bitrate is chosen from.
   if (window) return { ...chosen, kind: 'window', windowHandle: Number(window[1]) }
-  const display = /^screen:(\d+):/.exec(source.id)
-  // By display_id, not by position in the list: those two orders disagree, which is the bug that sent
-  // every native broadcast to the primary monitor. The index in the id is the capture index; the id in
-  // display_id is what matches Electron's own display list.
-  const matched = screen.getAllDisplays().find((item) => String(item.id) === source.display_id)
+  // The number inside "screen:<n>:" is not a capture index. It looked like one here -- this machine
+  // reports screen:0, screen:1, screen:2 for its three monitors -- and on a laptop with an external
+  // display it came back as 5, which is a Windows display identifier and not an index of anything. The
+  // capture then failed outright: "Failed to prepare capture object ... monitor-index: 5".
+  //
+  // What the capture wants is a zero-based position, so that is what is sent: where this display sits in
+  // Electron's own list. The size travels with it so the pipeline can check the two agree before
+  // trusting the number, since nothing here guarantees the two orders match on every machine.
+  const displays = screen.getAllDisplays()
+  const at = displays.findIndex((item) => String(item.id) === source.display_id)
+  const matched = at === -1 ? null : displays[at]
   const scale = matched && matched.scaleFactor > 0 ? matched.scaleFactor : 1
   return {
     ...chosen,
     kind: 'monitor',
-    monitorIndex: display ? Number(display[1]) : 0,
+    monitorIndex: at === -1 ? 0 : at,
     ...(matched ? { width: Math.round(matched.bounds.width * scale), height: Math.round(matched.bounds.height * scale) } : {}),
   }
 }

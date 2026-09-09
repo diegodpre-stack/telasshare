@@ -84,7 +84,11 @@ let processLoopback = null
 function supportsProcessLoopback(bin, run = spawnSync) {
   if (processLoopback !== null) return processLoopback
   try {
-    const probe = run(path.join(bin, 'gst-inspect-1.0.exe'), ['wasapi2src'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
+    // With this install's own environment, exactly as the pipeline is launched. Without it the scanner
+    // finds no elements at all and the answer is a confident no on a machine where it works -- which
+    // silently dropped both per-application sound and the exclusion that stops a screen share sending
+    // the friends being listened to their own voices back.
+    const probe = run(path.join(bin, 'gst-inspect-1.0.exe'), ['wasapi2src'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, env: pipelineEnv(process.env, bin) })
     processLoopback = typeof probe.stdout === 'string' && probe.stdout.includes('loopback-target-pid')
   } catch { processLoopback = false }
   return processLoopback
@@ -137,12 +141,37 @@ function encoderWorks(bin, element, run = spawnSync) {
   } catch { return false }
 }
 
-// System sound, minus the app itself. Without that exclusion the broadcast picks up the friends being
-// listened to and sends them their own voices back; excluding this process tree keeps everything else --
-// the game, the music -- and drops only what the app is playing.
-const audioArgs = ({ excludePid, allowProcessLoopback }) => {
+// The owning process of a window, so the sound of that one application can be captured and nothing
+// else. Windows answers this through GetWindowThreadProcessId, which needs native code; PowerShell
+// already has it, and this is asked once when a broadcast starts rather than per frame.
+//
+// Matching on MainWindowHandle is the limit of it: an application whose chosen window is not its main
+// one comes back empty, and the caller then falls back to system sound rather than to silence.
+function windowProcessId(handle, run = spawnSync) {
+  if (!Number.isInteger(handle) || handle <= 0) return null
+  try {
+    const probe = run('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      `(Get-Process | Where-Object { $_.MainWindowHandle -eq ${handle} } | Select-Object -First 1 -ExpandProperty Id)`,
+    ], { encoding: 'utf8', windowsHide: true, timeout: 8_000 })
+    const pid = Number(String(probe.stdout ?? '').trim())
+    return Number.isInteger(pid) && pid > 0 ? pid : null
+  } catch { return null }
+}
+
+// Which sound goes out, and it is not the same question in the two cases.
+//
+// Sharing one application: only that application, which is what the picker promises when somebody ticks
+// the box next to a window. The picker said so and this path did not do it -- it sent the whole desktop,
+// which sounds identical for as long as nothing else happens to be playing, and then does not.
+//
+// Sharing the whole screen: everything except this app. That exclusion is not a nicety -- without it the
+// broadcast picks up the friends being listened to and sends them their own voices back.
+const audioArgs = ({ excludePid, includePid, allowProcessLoopback }) => {
   const source = ['wasapi2src', 'loopback=true', 'low-latency=true']
-  if (allowProcessLoopback && Number.isInteger(excludePid) && excludePid > 0) {
+  if (allowProcessLoopback && Number.isInteger(includePid) && includePid > 0) {
+    source.push('loopback-mode=include-process-tree', `loopback-target-pid=${includePid}`)
+  } else if (allowProcessLoopback && Number.isInteger(excludePid) && excludePid > 0) {
     source.push('loopback-mode=exclude-process-tree', `loopback-target-pid=${excludePid}`)
   }
   return [
@@ -161,7 +190,7 @@ const audioArgs = ({ excludePid, allowProcessLoopback }) => {
 // settings below stay shared, which is the point -- today the app encodes once per viewer.
 function buildPipelineArgs({
   endpoint, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true,
-  audio = false, excludePid = null, allowProcessLoopback = false,
+  audio = false, excludePid = null, includePid = null, allowProcessLoopback = false,
   stunServer = null, turnServer = null, encoder = VIDEO_ENCODERS[0],
 } = {}) {
   if (!endpoint) throw new Error('endpoint is required')
@@ -202,7 +231,7 @@ function buildPipelineArgs({
     // whipsink rather than whipclientsink: the latter wraps webrtcsink, whose codec discovery fails on
     // D3D11 memory and which rejects already-encoded input with "not-negotiated" once a viewer attaches.
     '!', 'ws.',
-    ...(audio ? audioArgs({ excludePid, allowProcessLoopback }) : []),
+    ...(audio ? audioArgs({ excludePid, includePid, allowProcessLoopback }) : []),
   ]
 }
 
@@ -227,4 +256,4 @@ function startPipeline(options = {}, { env = process.env, spawnFn = spawn, exist
   return child
 }
 
-module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, VIDEO_ENCODERS }
+module.exports = { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, windowProcessId, VIDEO_ENCODERS }

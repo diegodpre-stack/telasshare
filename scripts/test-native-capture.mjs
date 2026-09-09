@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, VIDEO_ENCODERS } =
+const { findGstreamer, normalizeH264Profile, buildPipelineArgs, startPipeline, supportsProcessLoopback, pipelineEnv, pickVideoEncoder, encoderWorks, windowProcessId, VIDEO_ENCODERS } =
   createRequire(import.meta.url)('../desktop/nativeCapture.cjs')
 
 // --- finding the install -------------------------------------------------
@@ -176,10 +176,17 @@ for (const bad of [0, -1, null, 'x']) {
 
 // The probe reads gst-inspect once and remembers, since the answer cannot change while the app runs.
 let probes = 0
-const answer = (stdout) => () => { probes += 1; return { stdout } }
+let loopbackEnv = null
+const answer = (stdout) => (command, args, options) => { probes += 1; loopbackEnv = options?.env; return { stdout } }
 assert.equal(supportsProcessLoopback('D:\gst\bin', answer('loopback-target-pid : Process ID')), true)
 assert.equal(supportsProcessLoopback('D:\gst\bin', answer('')), true, 'the answer is cached, not asked again')
 assert.equal(probes, 1)
+// Asked with this install's own environment, exactly as the pipeline is launched. Without it the plugin
+// scanner finds nothing, the answer is a confident no on a machine where it works, and two things go at
+// once: one application's sound, and the exclusion that stops a screen share returning the friends being
+// listened to their own voices.
+assert.ok(loopbackEnv, 'the probe is given an environment')
+assert.ok(String(loopbackEnv.PATH ?? loopbackEnv.Path ?? '').includes('gst'), 'and it is this install, not whatever the system happens to have')
 
 // --- reachable candidates -------------------------------------------------
 // Host candidates alone are private addresses: fine on loopback, unreachable from anywhere else, so a
@@ -243,4 +250,41 @@ assert.ok(linkProbes[0].args.includes('nvh264enc'), 'with the encoder under test
 assert.ok(linkProbes[0].args.includes('d3d11convert'), 'through the same conversion the broadcast uses')
 assert.ok(linkProbes[0].args.some((entry) => entry.includes('width=(int)[2,')), 'and the same size constraint')
 
-console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, the encoder this machine actually has, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback; an odd window size is rounded to something NV12 can hold, and an encoder is chosen by whether it links rather than by whether it is registered.')
+// --- one application's sound, when that is what was shared --------------------
+// The picker promises "only the sound of the application you chose" next to a window, and this path
+// used to send the whole desktop instead: identical for as long as nothing else happens to be playing,
+// and then not. Including the window's own process tree is what makes the promise true.
+const onlyTheApp = buildPipelineArgs({ endpoint: 'http://x/whip', audio: true, includePid: 19040, excludePid: 4321, allowProcessLoopback: true }).join(' ')
+assert.ok(onlyTheApp.includes('loopback-mode=include-process-tree'), 'that application, not the desktop')
+assert.ok(onlyTheApp.includes('loopback-target-pid=19040'), 'and it is the window that names it')
+assert.ok(!onlyTheApp.includes('loopback-target-pid=4321'), 'excluding ourselves is meaningless once only one app is captured')
+
+// A whole screen has no owning application, so the old behaviour is what is left: everything except this
+// app, which is not a nicety -- without it the broadcast returns the friends their own voices.
+const wholeScreen = buildPipelineArgs({ endpoint: 'http://x/whip', audio: true, includePid: null, excludePid: 4321, allowProcessLoopback: true }).join(' ')
+assert.ok(wholeScreen.includes('loopback-mode=exclude-process-tree') && wholeScreen.includes('loopback-target-pid=4321'))
+for (const bad of [0, -1, 1.5, '19040', null, undefined, NaN]) {
+  const args = buildPipelineArgs({ endpoint: 'http://x/whip', audio: true, includePid: bad, excludePid: 4321, allowProcessLoopback: true }).join(' ')
+  assert.ok(!args.includes('include-process-tree'), `a pid of ${String(bad)} must not be treated as an application`)
+  assert.ok(args.includes('loopback-target-pid=4321'), 'and the safe behaviour is what it falls back to')
+}
+
+// --- and the window has to be able to name its application --------------------
+const pidQueries = []
+const answers = (stdout) => (command, args) => { pidQueries.push({ command, args }); return { stdout } }
+assert.equal(windowProcessId(66880, answers('  19040  ')), 19040, 'the handle resolves to the process that owns it, whitespace and all')
+assert.ok(pidQueries[0].args.some((entry) => entry.includes('MainWindowHandle -eq 66880')), 'asked about that window and no other')
+// An application whose chosen window is not its main one answers nothing, and nothing is not a pid: the
+// broadcast then carries system sound rather than falling silent.
+assert.equal(windowProcessId(66880, answers('')), null)
+assert.equal(windowProcessId(66880, answers('nao-e-um-numero')), null)
+assert.equal(windowProcessId(66880, () => { throw new Error('no powershell') }), null, 'and a machine without PowerShell is not a crash')
+// Counted rather than thrown: the throw was caught by the same handler that makes a missing PowerShell
+// safe, so the assertion passed whether or not anything was asked -- which is no assertion at all.
+for (const bad of [0, -1, null, 'x', 1.5]) {
+  let calls = 0
+  assert.equal(windowProcessId(bad, () => { calls += 1; return { stdout: '19040' } }), null, `${String(bad)} is not a window`)
+  assert.equal(calls, 0, `and ${String(bad)} is refused without asking the system anything`)
+}
+
+console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, the encoder this machine actually has, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback; an odd window size is rounded to something NV12 can hold, and an encoder is chosen by whether it links rather than by whether it is registered; sharing one window with sound carries that application alone, a whole screen still carries everything but this app, and a window that cannot name its process falls back rather than falling silent.')

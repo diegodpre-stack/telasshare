@@ -230,7 +230,7 @@ const audioArgs = ({ excludePid, includePid, allowProcessLoopback }) => {
 // settings below stay shared, which is the point -- today the app encodes once per viewer.
 function buildPipelineArgs({
   endpoint, monitorIndex = 0, windowHandle = null, fps = 60, bitrateKbps = 12_000, showCursor = true,
-  audio = false, excludePid = null, includePid = null, allowProcessLoopback = false,
+  audio = false, excludePid = null, includePid = null, allowProcessLoopback = false, maxHeight = null,
   stunServer = null, turnServer = null, encoder = VIDEO_ENCODERS[0],
 } = {}) {
   if (!endpoint) throw new Error('endpoint is required')
@@ -252,13 +252,24 @@ function buildPipelineArgs({
     // BGRA to NV12 on the GPU. Letting the encoder pull system memory here is the whole bug we are
     // avoiding, so this element must stay between the source and the encoder.
     '!', 'd3d11convert',
+    // Three things at once, and each of them was learned the hard way.
+    //
     // Even numbers, or nothing downstream works. A window is whatever size the person left it -- the one
     // this was found on reported 1282x721 -- and NV12 subsamples chroma two by two, so an odd height
     // cannot be represented at all. The convert failed, the error surfaced at the source as "Internal
     // data stream error", and window capture looked broken while full-screen capture was fine, because a
-    // monitor is always even. The step of 2 in the range lets the scaler round to the nearest even size
-    // rather than pinning a resolution, so a window resized mid-broadcast simply renegotiates.
-    '!', 'video/x-raw(memory:D3D11Memory),format=NV12,width=(int)[2,8192,2],height=(int)[2,8192,2]',
+    // monitor is always even. The step of 2 lets the scaler round rather than pinning a resolution, so a
+    // window resized mid-broadcast simply renegotiates.
+    //
+    // A ceiling on the height is how the resolution people choose is actually applied. A range rather
+    // than a fixed size, so a source already smaller than the ceiling is left alone instead of being
+    // stretched up to it.
+    //
+    // Square pixels, or the ceiling does almost nothing: asked for at most 1080 lines from a 2560x1440
+    // screen, the scaler kept the width and sent 2560x1080 with a 3:4 pixel aspect, which is more pixels
+    // than 1920x1080 and leans on the far end to undo the squashing. Pinned to 1/1 it picks 1920x1080,
+    // which is what was asked for.
+    '!', `video/x-raw(memory:D3D11Memory),format=NV12,pixel-aspect-ratio=(fraction)1/1,width=(int)[2,8192,2],height=(int)[2,${positiveInt(maxHeight, 8192)},2]`,
     // cabac and b-frames off: constrained baseline forbids both, and B-frames add latency a live
     // broadcast cannot spend. Bitrate is fixed -- whipsink has no congestion control, and webrtcsink's
     // could not drive amfh264enc either ("Bitrate handling is not supported yet for amfh264enc").

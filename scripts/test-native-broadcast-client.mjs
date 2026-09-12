@@ -40,13 +40,45 @@ globalThis.window = { electronAPI: api }
 globalThis.RTCPeerConnection = FakePeer
 globalThis.MediaStream = class { constructor(tracks = []) { this.tracks = tracks } }
 
-const { createNativeBroadcast, PREVIEW_ID, isNativeCaptureAvailable, nativeIceServers, nativeBitrateKbps } = await import('../src/nativeBroadcast.js')
+const { createNativeBroadcast, PREVIEW_ID, isNativeCaptureAvailable, nativeIceServers, nativeBitrateKbps, nativeOutputSize } = await import('../src/nativeBroadcast.js')
 
 // --- bitrate for what is actually being encoded ---------------------------
 // Nothing on the native path adapts the bitrate later, so the number picked at the start is the number
 // sent for the whole broadcast: too low ruins 1440p60, too high spends quota on a still desktop.
 const near = (actual, expected, label) =>
   assert.ok(Math.abs(actual - expected) / expected < 0.15, `${label}: ${actual} kbps is far from ${expected}`)
+// --- the size that is actually encoded --------------------------------------
+// The resolution people choose was ignored on this path: it always sent the screen at its full size, so
+// picking 1080p to help a struggling viewer changed nothing at all. These are the sizes the pipeline
+// negotiates, checked against what GStreamer really produced for each of them rather than derived twice
+// from the same idea.
+const tamanho = (w, h, max) => { const s = nativeOutputSize(w, h, max); return `${s.width}x${s.height}` }
+assert.equal(tamanho(2560, 1440, 1080), '1920x1080', 'a 1440p screen asked for 1080p')
+assert.equal(tamanho(2560, 1440, 720), '1280x720')
+assert.equal(tamanho(3440, 1440, 1080), '2580x1080', 'an ultrawide keeps its shape')
+// Never upscaled: a source already smaller than the ceiling is left where it is.
+assert.equal(tamanho(1280, 720, 1080), '1280x720', 'a smaller source is not stretched up to the ceiling')
+assert.equal(tamanho(1280, 720, 1440), '1280x720')
+// Auto means the size the screen already has, with an odd one rounded down because NV12 cannot hold it.
+assert.equal(tamanho(2560, 1440, null), '2560x1440')
+assert.equal(tamanho(1282, 721, null), '1280x720', 'an odd window is evened even with no ceiling')
+assert.equal(tamanho(999, 501, undefined), '998x500')
+// A window has no known size until it is captured, so it is budgeted as 1080p, as it always was.
+assert.equal(tamanho(null, null, null), '1920x1080')
+assert.equal(tamanho(undefined, undefined, 720), '1280x720', 'and the ceiling still applies to the guess')
+// Nothing degenerate comes out, whatever goes in.
+for (const [w, h, max] of [[0, 0, 1080], [-5, -5, 720], [2560, 1440, 0], [2560, 1440, -1], [2560, 1440, NaN]]) {
+  const size = nativeOutputSize(w, h, max)
+  assert.ok(size.width >= 2 && size.height >= 2 && size.width % 2 === 0 && size.height % 2 === 0,
+    `${w}x${h} ceiling ${max} still yields an even, usable size`)
+}
+
+// And the bitrate follows the size that is sent, not the size of the screen -- otherwise choosing a
+// smaller picture would send it at the price of the larger one, which is the whole point of choosing.
+const menor = nativeOutputSize(2560, 1440, 1080)
+assert.ok(nativeBitrateKbps(menor.width, menor.height, 60) < nativeBitrateKbps(2560, 1440, 60) * 0.7,
+  'picking 1080p on a 1440p screen costs meaningfully less bandwidth')
+
 near(nativeBitrateKbps(1920, 1080, 30), 5000, '1080p30')
 near(nativeBitrateKbps(1920, 1080, 60), 8000, '1080p60')
 near(nativeBitrateKbps(2560, 1440, 30), 8000, '1440p30')

@@ -320,4 +320,23 @@ for (const missing of [{}, { width: 1920 }, { height: 1080 }, { width: 0, height
   assert.deepEqual(nada, [], 'and no pipeline is launched to find that out')
 }
 
+// --- the chosen resolution reaches the pipeline -----------------------------
+// This path ignored it entirely: the screen always went out at its full size, so somebody picking 1080p
+// to help a viewer who was struggling got no relief at all.
+// Found by the format rather than by anything being asserted below, so removing one of those does not
+// quietly break the search and fail somewhere else instead.
+const capsDe = (max) => buildPipelineArgs({ endpoint: 'http://x/whip', monitorIndex: 0, maxHeight: max })
+  .find((entry) => typeof entry === 'string' && entry.includes('format=NV12'))
+assert.match(capsDe(1080), /height=\(int\)\[2,1080,2\]/, 'a ceiling of 1080 reaches the caps')
+assert.match(capsDe(720), /height=\(int\)\[2,720,2\]/)
+// Auto means no ceiling worth the name, and the same for anything that is not a usable number.
+for (const semTeto of [null, undefined, 0, -1, 'alto', NaN]) {
+  assert.match(capsDe(semTeto), /height=\(int\)\[2,8192,2\]/, `${String(semTeto)} leaves the size alone`)
+}
+// Square pixels, or the ceiling does almost nothing: without this the scaler kept the width and sent
+// 2560x1080 with a 3:4 pixel aspect, which is more pixels than 1920x1080 rather than fewer.
+assert.match(capsDe(1080), /pixel-aspect-ratio=\(fraction\)1\/1/, 'and the pixels stay square')
+// The width is never pinned: an ultrawide has to be allowed its own shape.
+assert.match(capsDe(1080), /width=\(int\)\[2,8192,2\]/)
+
 console.log('PASS: bundled-first discovery, an isolated plugin environment, constrained-baseline rewriting, GPU-resident pipeline, the encoder this machine actually has, window and monitor selection, system sound with the app excluded, reachable ICE, sane defaults and missing-install fallback; an odd window size is rounded to something NV12 can hold, and an encoder is chosen by whether it links rather than by whether it is registered; sharing one window with sound carries that application alone, a whole screen still carries everything but this app, and a window that cannot name its process falls back rather than falling silent; a monitor index is checked against the size it captures and corrected when it turns out not to be an index at all.')

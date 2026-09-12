@@ -55,6 +55,24 @@ export function nativeIceServers(servers = []) {
 // and the ceiling is the per-viewer limit the app has always had.
 const MIN_KBPS = 1_500
 const MAX_KBPS = 20_000
+// The size that will actually be encoded, which is not the size of the screen once somebody has chosen
+// a resolution. The bitrate has to follow this rather than the capture, or choosing 1080p on a 1440p
+// screen would send a smaller picture at the price of the larger one -- which is the whole reason the
+// choice exists.
+//
+// Mirrors what the pipeline negotiates: never larger than the source, rounded down to even, and the
+// width taken from the height so the shape is kept.
+export function nativeOutputSize(width, height, maxHeight) {
+  const known = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+  // A window's size is unknown until it is captured, so it is budgeted as 1080p, as it always was.
+  const sourceWidth = known ? width : 1920
+  const sourceHeight = known ? height : 1080
+  const ceiling = Number.isFinite(maxHeight) && maxHeight > 0 ? Math.min(maxHeight, sourceHeight) : sourceHeight
+  const outHeight = Math.max(2, Math.floor(ceiling / 2) * 2)
+  const outWidth = Math.max(2, Math.round(sourceWidth * outHeight / sourceHeight / 2) * 2)
+  return { width: outWidth, height: outHeight }
+}
+
 export function nativeBitrateKbps(width, height, fps) {
   const pixels = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
     ? width * height

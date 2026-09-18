@@ -191,11 +191,14 @@
 .shell>.panel-toggles{margin-top:8px}
 
 /* Permanent rooms: what they are, and what may be done to them from the lobby. */
-.room-entry{display:flex;flex-direction:column;gap:6px}
-.room-entry .room-card{width:100%}
+/* The delete controls sit inside the card's top corner rather than above it. Above, they pushed the one
+   card that had them out of line with every other card in the grid. Kept outside the card's own button
+   in the markup, because a button cannot hold another. */
+.room-entry{position:relative;display:flex;flex-direction:column}
+.room-entry .room-card{width:100%;flex:1}
 .room-badge{display:inline-flex;align-items:center;gap:3px;margin-left:7px;padding:1px 6px;border-radius:8px;background:#163c34;color:#8ce8cc;font-size:9px;font-weight:800;vertical-align:middle}
-.room-tools{display:flex;gap:6px;justify-content:flex-end}
-.room-tools button{display:flex;align-items:center;gap:5px;padding:6px 9px;border-radius:8px;font-size:10px;font-weight:700;border:1px solid #3a4a5e;background:#172638;color:#b4c1ce}
+.room-tools{position:absolute;z-index:1;top:8px;right:10px;display:flex;gap:5px;justify-content:flex-end}
+.room-tools button{display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:7px;font-size:9px;font-weight:700;border:1px solid #3a4a5e;background:#172638;color:#b4c1ce}
 .room-tools .room-delete:hover{border-color:#61343b;color:#ff9299}
 .room-tools .room-keep:hover{border-color:#31745f;color:#8ce8cc}
 .room-kind{display:flex!important;align-items:flex-start;gap:9px;text-align:left;margin-bottom:14px!important;text-transform:none!important;letter-spacing:0!important}

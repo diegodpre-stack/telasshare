@@ -492,7 +492,7 @@ export default function App() {
   const [roomPermanent, setRoomPermanent] = useState(false)
   const [coOwners, setCoOwners] = useState([])
   const [roomClosing, setRoomClosing] = useState(null)
-  const [newRoomPermanent, setNewRoomPermanent] = useState(true)
+  const [newRoomPermanent, setNewRoomPermanent] = useState(false)
   const [deleting, setDeleting] = useState(null)
   const [deletePassword, setDeletePassword] = useState('')
   const [uploading, setUploading] = useState(false)

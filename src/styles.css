@@ -154,6 +154,8 @@
 .panel.drop-left::before{top:0;bottom:0;left:0;width:4px}
 .panel.drop-right::before{top:0;bottom:0;right:0;width:4px}
 .layout-reset{margin-left:auto}
+/* Always there, so nothing beside it moves when it is used; greyed out while there is nothing to undo. */
+.people-toggle:disabled,.people-toggle:disabled:hover{opacity:.4;cursor:default;border-color:#30465b;color:#a9bdcf}
 
 /* The two shortcuts used to float over the bottom-right corner of whatever was on screen. In the header
    they are out of the way of the thing being watched. */

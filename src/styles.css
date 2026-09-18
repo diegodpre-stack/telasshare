@@ -168,7 +168,11 @@
 /* On a small screen nobody is arranging anything: the sizes are set as inline styles, so undoing them
    here has to be explicit. */
 @media(max-width:900px){
-  .workspace.panels{display:block}
+  /* One panel under another, and the picture first: it is what people come for, and under a 460px
+     friends list on a phone it was a scroll away that nothing on screen hinted at. */
+  .workspace.panels{display:flex;flex-direction:column;align-items:stretch;gap:0}
+  .panel-column:has(>.panel.stage){order:-1;flex:none}
+  .panel-column{max-width:none!important}
   .panel-column{width:auto!important;min-width:0;max-width:none;resize:none;display:block}
   .panel.resizable{width:auto!important;height:auto!important;min-width:0;min-height:0;max-width:none;resize:none;margin-bottom:14px}
   .global-actions.inline .app-download-button strong{font-size:0}

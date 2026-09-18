@@ -630,25 +630,56 @@ export default function App() {
   const panelNodesRef = useRef(new Map())
 
   const columnOf = (id) => layoutRef.current.columns.find((column) => column.includes(id)) || []
+  // The column with the picture in it follows the window instead of holding a width. A width chosen by
+  // hand becomes how wide it may grow, not how wide it must be: held as a fixed width it could not fit
+  // beside the friends list on a smaller window, and the whole thing dropped to below the fold -- where
+  // people opening the site for the first time never found it.
+  const followsWindow = (column) => column.includes('stage')
+  const applyColumnWidth = (column, width) => {
+    const columnNode = columnNodesRef.current.get(column[0])
+    if (!columnNode) return
+    if (followsWindow(column)) { columnNode.style.width = ''; columnNode.style.maxWidth = `${width}px` } else columnNode.style.width = `${width}px`
+  }
   const applyWidth = (id, width) => {
     const column = columnOf(id)
     const lead = column[0]
     if (!lead) return
     layoutRef.current.resize(lead, { width })
-    const columnNode = columnNodesRef.current.get(lead)
-    if (columnNode) {
-      columnNode.style.width = `${width}px`
-      // The picture's column is told to take whatever the others leave, which would swallow a width
-      // chosen by hand. Once somebody has chosen one, it stops growing on its own.
-      columnNode.style.flex = '0 0 auto'
-    }
-    // Siblings follow; the one under the pointer is left alone.
+    applyColumnWidth(column, width)
+    // Siblings follow; the one under the pointer is left alone. In the picture's column nothing is
+    // written at all: they stretch to the column, and the column follows the window.
+    if (followsWindow(column)) return
     for (const other of column) {
       if (other === id) continue
       const node = panelNodesRef.current.get(other)
       if (node) node.style.width = `${width}px`
     }
   }
+
+  // Only a drag is a choice. The observer below also fires when a panel first appears and whenever the
+  // window changes size, and reading those as choices is what saved the picture at the width of the
+  // whole screen the first time anybody opened the site -- nobody had touched anything. So a size is
+  // written only while a panel's own grip is held: a press on the panel itself rather than on anything
+  // inside it, which is the only way to catch the grip.
+  const resizingRef = useRef(null)
+  useEffect(() => {
+    const release = () => {
+      const id = resizingRef.current
+      if (!id) return
+      // A little later than the release, so the last movement of the drag is still counted.
+      setTimeout(() => {
+        if (resizingRef.current !== id) return
+        resizingRef.current = null
+        // The browser leaves the dragged width on the panel itself. In the picture's column the column
+        // now holds it as a ceiling, so the panel lets go of it and stretches -- and shrinks -- again.
+        const node = panelNodesRef.current.get(id)
+        if (node && followsWindow(columnOf(id))) node.style.width = ''
+      }, 120)
+    }
+    window.addEventListener('pointerup', release)
+    window.addEventListener('pointercancel', release)
+    return () => { window.removeEventListener('pointerup', release); window.removeEventListener('pointercancel', release) }
+  }, [])
 
   // Built once per panel and kept. A fresh callback each render would make React detach and reattach the
   // element every time, which tears down the observer mid-drag and loses the size being dragged to.
@@ -663,12 +694,13 @@ export default function App() {
         const size = layoutRef.current.sizeOf(id)
         if (size.height) node.style.height = `${size.height}px`
         const columnWidth = layoutRef.current.sizeOf(columnOf(id)[0] || id).width
-        if (columnWidth) node.style.width = `${columnWidth}px`
+        if (columnWidth && !followsWindow(columnOf(id))) node.style.width = `${columnWidth}px`
+        node.addEventListener('pointerdown', (event) => { if (event.target === node) resizingRef.current = id })
         if (typeof ResizeObserver === 'undefined') return
         // Fires on every pixel of a drag. The module ignores a size it already has, so the write and the
         // redraw only happen when the number actually changed.
         const observer = new ResizeObserver(() => {
-          if (!node.isConnected) return
+          if (!node.isConnected || resizingRef.current !== id) return
           layoutRef.current.resize(id, { height: node.offsetHeight })
           applyWidth(id, node.offsetWidth)
         })
@@ -687,7 +719,7 @@ export default function App() {
         if (!node) { columnNodesRef.current.delete(leadId); return }
         columnNodesRef.current.set(leadId, node)
         const size = layoutRef.current.sizeOf(leadId)
-        if (size.width) node.style.width = `${size.width}px`
+        if (size.width) applyColumnWidth(columnOf(leadId), size.width)
       })
     }
     return columnRefsRef.current.get(leadId)
@@ -731,7 +763,7 @@ export default function App() {
   // they have to be taken off the elements too, or restoring would only take effect on the next reload.
   const resetLayout = () => {
     for (const node of panelNodesRef.current.values()) { node.style.width = ''; node.style.height = '' }
-    for (const node of columnNodesRef.current.values()) { node.style.width = ''; node.style.flex = '' }
+    for (const node of columnNodesRef.current.values()) { node.style.width = ''; node.style.maxWidth = ''; node.style.flex = '' }
     layoutRef.current.reset()
   }
 

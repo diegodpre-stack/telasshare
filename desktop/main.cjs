@@ -23,6 +23,7 @@ const APP_URL = localAppUrl || buildServer || 'https://telasshare.duckdns.org'
 
 // Apply one list per switch: appendSwitch replaces a previous value for the same switch.
 const { mediaFeaturePolicy, createMediaRuntimeLog } = require('./mediaRuntime.cjs')
+const { createLoadRecovery } = require('./loadRecovery.cjs')
 const { findGstreamer, supportsProcessLoopback, windowProcessId } = require('./nativeCapture.cjs')
 const { createNativeBroadcast } = require('./nativeBroadcast.cjs')
 const mediaPolicy = mediaFeaturePolicy()
@@ -358,6 +359,18 @@ function createWindow() {
     if (!isTrustedUrl(url)) { event.preventDefault(); openIfWeb(url) }
   })
   mainWindow.webContents.on('render-process-gone', (_event, details) => mediaRuntime.record('renderer-process-gone', details))
+  // A page that never draws recovers on its own rather than leaving somebody looking at the window's
+  // background colour with no way to know that a damaged cache is why. See loadRecovery.cjs.
+  const contents = mainWindow.webContents
+  const loadRecovery = createLoadRecovery({
+    checkMounted: () => contents.executeJavaScript("!!document.getElementById('root')?.childElementCount", true),
+    clearCache: () => contents.session.clearCache(),
+    reload: () => contents.reloadIgnoringCache(),
+    record: (event, detail) => mediaRuntime.record(event, detail),
+  })
+  contents.on('did-finish-load', () => loadRecovery.onLoaded())
+  contents.on('did-fail-load', (_event, errorCode, _description, _url, isMainFrame) => loadRecovery.onFailedLoad(errorCode, isMainFrame))
+  mainWindow.on('closed', () => loadRecovery.dispose())
   mainWindow.loadURL(APP_URL)
 }
 
